@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Malaki</string>
+    <string name="accessibility_service_description">Collects messages from apps for data analysis</string>
+    <!-- Add this if using message_accessibility_description -->
+    <string name="message_accessibility_description">Collects messages from apps for data analysis</string>
+</resources>

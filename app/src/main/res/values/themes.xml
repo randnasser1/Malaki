@@ -1,0 +1,15 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Base application theme -->
+    <style name="Base.Theme.Malaki" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Customize your light/dark theme colors here if needed -->
+        <!-- Example: <item name="colorPrimary">@color/my_primary</item> -->
+    </style>
+
+    <!-- Main theme used in the manifest -->
+    <style name="Theme.Malaki" parent="Base.Theme.Malaki" />
+
+    <!-- Optional: Theme overlay for the app if needed -->
+    <style name="Theme.Malak.DayNight" parent="Theme.Material3.DayNight.NoActionBar" />
+
+</resources>

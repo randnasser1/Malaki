@@ -32,6 +32,7 @@ import com.example.malaki.ui.theme.MalakiTheme
 sealed class AuthScreen {
     data object UserType : AuthScreen()
     data object ParentLogin : AuthScreen()
+    data object AddChild : AuthScreen()
     data object ChildLogin : AuthScreen()
     data object ParentRegister : AuthScreen()
     data object GenerateCode : AuthScreen()
@@ -137,6 +138,7 @@ fun AppAuthFlow(
                         onNavigate = { view ->
                             when (view) {
                                 "generateCode" -> currentScreen = AuthScreen.GenerateCode
+                                "addChild" -> currentScreen = AuthScreen.AddChild
                                 "logout" -> {
                                     authManager.logout()
                                     isLoggedIn = false
@@ -145,6 +147,17 @@ fun AppAuthFlow(
                                 else -> { /* Handle other navigation */ }
                             }
                         }
+                    )
+                }
+
+// Add new screen
+                AuthScreen.AddChild -> {
+                    AddChildScreen(
+                        parentId = authManager.currentUser?.uid ?: "",
+                        onChildAdded = {
+                            currentScreen = AuthScreen.ParentHome
+                        },
+                        onBack = { currentScreen = AuthScreen.ParentHome }
                     )
                 }
 

@@ -76,15 +76,16 @@ fun ParentDashboard(
                     fontSize = 14.sp
                 )
                 Spacer(modifier = Modifier.height(16.dp))
+                // Add this button in the header section
                 Button(
-                    onClick = { onNavigate("child") },
+                    onClick = { onNavigate("addChild") },
                     shape = RoundedCornerShape(50),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF3B82F6),
+                        containerColor = Color(0xFF10B981),
                         contentColor = Color.White
                     )
                 ) {
-                    Text("Switch to Child View")
+                    Text("+ Add Child")
                 }
             }
         }

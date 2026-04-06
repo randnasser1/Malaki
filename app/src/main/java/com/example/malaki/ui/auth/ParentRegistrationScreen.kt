@@ -1,6 +1,8 @@
 package com.example.malaki.ui.auth
 
-import android.widget.Toast
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.util.Log
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -16,9 +18,85 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
+import java.io.ByteArrayOutputStream
+import java.util.UUID
+// Add missing imports
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.tasks.await
+private suspend fun registerUser(
+    email: String,
+    password: String,
+    fullName: String,
+    childName: String,
+    childAge: String,
+    childPin: String,
+    onSuccess: () -> Unit,
+    onError: (String) -> Unit
+) {
+    try {
+        val auth = FirebaseAuth.getInstance()
+        val firestore = FirebaseFirestore.getInstance()
+
+        // Create parent account
+        val authResult = auth.createUserWithEmailAndPassword(email, password).await()
+        val parentId = authResult.user?.uid ?: throw Exception("Failed to create parent account")
+
+        // Create child account (anonymous)
+        val childAuth = auth.signInAnonymously().await()
+        val childId = childAuth.user?.uid ?: throw Exception("Failed to create child account")
+
+        // Save parent data
+        val parentData = hashMapOf(
+            "userId" to parentId,
+            "fullName" to fullName,
+            "email" to email,
+            "userType" to "PARENT",
+            "childId" to childId,
+            "createdAt" to System.currentTimeMillis()
+        )
+
+        firestore.collection("users").document(parentId).set(parentData).await()
+
+        // Save child data
+        val childData = hashMapOf(
+            "userId" to childId,
+            "name" to childName,
+            "age" to childAge.toInt(),
+            "pinCode" to childPin,
+            "userType" to "CHILD",
+            "parentId" to parentId,
+            "createdAt" to System.currentTimeMillis()
+        )
+
+        firestore.collection("users").document(childId).set(childData).await()
+
+        // Generate connection code
+        val connectionCode = String.format("%06d", (100000..999999).random())
+        val codeData = hashMapOf(
+            "code" to connectionCode,
+            "parentId" to parentId,
+            "childId" to childId,
+            "createdAt" to System.currentTimeMillis(),
+            "expiresAt" to System.currentTimeMillis() + (24 * 60 * 60 * 1000),
+            "used" to false
+        )
+
+        firestore.collection("connection_codes").document(connectionCode).set(codeData).await()
+
+        // Sign back in as parent
+        auth.signOut()
+        auth.signInWithEmailAndPassword(email, password).await()
+
+        onSuccess()
+    } catch (e: Exception) {
+        onError(e.message ?: "Registration failed")
+    }
+}
 @Composable
 fun ParentRegistrationScreen(
     onRegistrationSuccess: () -> Unit,
@@ -27,19 +105,23 @@ fun ParentRegistrationScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // Form fields
+    // Parent form fields
     var fullName by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var confirmPassword by remember { mutableStateOf("") }
+
+    // Child form fields
     var childName by remember { mutableStateOf("") }
     var childAge by remember { mutableStateOf("") }
+    var childPin by remember { mutableStateOf("") }
+    var confirmChildPin by remember { mutableStateOf("") }
 
     // UI states
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var showChildForm by remember { mutableStateOf(true) }
 
-    // Firebase instances
     val auth = FirebaseAuth.getInstance()
     val firestore = FirebaseFirestore.getInstance()
 
@@ -81,6 +163,18 @@ fun ParentRegistrationScreen(
                 errorMessage = "Child age must be between 4 and 17"
                 return false
             }
+            childPin.isBlank() -> {
+                errorMessage = "Please create a PIN for your child (4-6 digits)"
+                return false
+            }
+            childPin.length < 4 -> {
+                errorMessage = "PIN must be at least 4 digits"
+                return false
+            }
+            childPin != confirmChildPin -> {
+                errorMessage = "PINs do not match"
+                return false
+            }
         }
         return true
     }
@@ -88,7 +182,8 @@ fun ParentRegistrationScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // Back button
@@ -111,118 +206,145 @@ fun ParentRegistrationScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
-            text = "Set up your account to monitor your child's wellbeing",
+            text = "Set up your account and add your child",
             fontSize = 14.sp,
             color = Color.Gray
         )
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // Full Name
-        OutlinedTextField(
-            value = fullName,
-            onValueChange = { fullName = it },
-            label = { Text("Full Name") },
-            placeholder = { Text("John Doe") },
+        // ========== PARENT SECTION ==========
+        Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                unfocusedBorderColor = Color(0xFFD1D5DB)
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = Color(0xFFF0F4F8)
             )
-        )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Parent Information",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
 
-        Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = fullName,
+                    onValueChange = { fullName = it },
+                    label = { Text("Full Name") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
 
-        // Email
-        OutlinedTextField(
-            value = email,
-            onValueChange = { email = it },
-            label = { Text("Email") },
-            placeholder = { Text("parent@example.com") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = { Text("Email") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("Password") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = confirmPassword,
+                    onValueChange = { confirmPassword = it },
+                    label = { Text("Confirm Password") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // ========== CHILD SECTION ==========
+        Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                unfocusedBorderColor = Color(0xFFD1D5DB)
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = Color(0xFFFFF8E7)
             )
-        )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Child Information",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
 
-        Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = childName,
+                    onValueChange = { childName = it },
+                    label = { Text("Child's Name") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
 
-        // Password
-        OutlinedTextField(
-            value = password,
-            onValueChange = { password = it },
-            label = { Text("Password") },
-            placeholder = { Text("••••••••") },
-            visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                unfocusedBorderColor = Color(0xFFD1D5DB)
-            )
-        )
+                Spacer(modifier = Modifier.height(8.dp))
 
-        Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = childAge,
+                    onValueChange = { childAge = it },
+                    label = { Text("Child's Age") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
 
-        // Confirm Password
-        OutlinedTextField(
-            value = confirmPassword,
-            onValueChange = { confirmPassword = it },
-            label = { Text("Confirm Password") },
-            placeholder = { Text("••••••••") },
-            visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                unfocusedBorderColor = Color(0xFFD1D5DB)
-            )
-        )
+                Spacer(modifier = Modifier.height(8.dp))
 
-        Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = childPin,
+                    onValueChange = { childPin = it.take(6) },
+                    label = { Text("Child's PIN (4-6 digits)") },
+                    placeholder = { Text("e.g., 1234") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
 
-        // Child Name
-        OutlinedTextField(
-            value = childName,
-            onValueChange = { childName = it },
-            label = { Text("Child's Name") },
-            placeholder = { Text("Child's name") },
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                unfocusedBorderColor = Color(0xFFD1D5DB)
-            )
-        )
+                Spacer(modifier = Modifier.height(8.dp))
 
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Child Age
-        OutlinedTextField(
-            value = childAge,
-            onValueChange = { childAge = it },
-            label = { Text("Child's Age") },
-            placeholder = { Text("e.g., 8") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                unfocusedBorderColor = Color(0xFFD1D5DB)
-            )
-        )
+                OutlinedTextField(
+                    value = confirmChildPin,
+                    onValueChange = { confirmChildPin = it.take(6) },
+                    label = { Text("Confirm Child's PIN") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
+            }
+        }
 
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -233,7 +355,7 @@ fun ParentRegistrationScreen(
         ) {
             Checkbox(
                 checked = true,
-                onCheckedChange = { /* Handle terms acceptance */ },
+                onCheckedChange = { },
                 colors = CheckboxDefaults.colors(
                     checkedColor = MaterialTheme.colorScheme.primary
                 )
@@ -264,40 +386,17 @@ fun ParentRegistrationScreen(
                     if (validateForm()) {
                         isLoading = true
                         errorMessage = null
-
-                        try {
-                            // Create user in Firebase Auth
-                            val authResult = auth.createUserWithEmailAndPassword(email, password).await()
-                            val userId = authResult.user?.uid
-
-                            if (userId != null) {
-                                // Save parent data to Firestore
-                                val parentData = hashMapOf(
-                                    "userId" to userId,
-                                    "fullName" to fullName,
-                                    "email" to email,
-                                    "userType" to "PARENT",
-                                    "childName" to childName,
-                                    "childAge" to childAge.toInt(),
-                                    "createdAt" to System.currentTimeMillis()
-                                )
-
-                                firestore.collection("users")
-                                    .document(userId)
-                                    .set(parentData)
-                                    .await()
-
-                                // Send email verification
-                                auth.currentUser?.sendEmailVerification()
-
-                                Toast.makeText(context, "Account created successfully!", Toast.LENGTH_LONG).show()
-                                onRegistrationSuccess()
-                            }
-                        } catch (e: Exception) {
-                            errorMessage = e.message ?: "Registration failed"
-                        } finally {
-                            isLoading = false
-                        }
+                        registerUser(
+                            email = email,
+                            password = password,
+                            fullName = fullName,
+                            childName = childName,
+                            childAge = childAge,
+                            childPin = childPin,
+                            onSuccess = { onRegistrationSuccess() },
+                            onError = { errorMessage = it }
+                        )
+                        isLoading = false
                     }
                 }
             },
@@ -314,10 +413,9 @@ fun ParentRegistrationScreen(
             if (isLoading) {
                 CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Color.White)
             } else {
-                Text("Create Account", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text("Create Account & Add Child", fontSize = 16.sp, fontWeight = FontWeight.Medium)
             }
         }
     }
 }
 
-// Add missing imports

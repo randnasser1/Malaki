@@ -31,3 +31,8 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# URL Api
+secrets.properties
+
+secrets.properties

@@ -65,6 +65,7 @@ dependencies {
     implementation("com.google.firebase:firebase-firestore")
     implementation("com.google.firebase:firebase-messaging")
     implementation("com.google.firebase:firebase-storage")
+    implementation(libs.firebase.appcheck.debug)
 
     // Jetpack Compose - Use older BOM that works with compileSdk 34
     val composeBom = platform("androidx.compose:compose-bom:2024.10.00")
@@ -85,6 +86,7 @@ dependencies {
     // Kotlin
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.0.21")
+    implementation("com.google.firebase:firebase-appcheck-debug:17.0.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

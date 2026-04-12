@@ -16,6 +16,8 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.example.malaki.auth.AuthManager
 import com.example.malaki.ui.auth.AppAuthFlow
 import com.example.malaki.ui.theme.MalakiTheme
+import com.google.firebase.appcheck.FirebaseAppCheck
+import com.google.firebase.appcheck.debug.DebugAppCheckProviderFactory
 
 class MainActivity : AppCompatActivity() {
 
@@ -39,10 +41,14 @@ class MainActivity : AppCompatActivity() {
 
         // Initialize Firebase
         initializeFirebase()
-
+        testFirestoreWrite()
         // Start background services if permissions are granted
         startBackgroundServicesIfPermitted()
-
+// Add this after initializeFirebase()
+        val firebaseAppCheck = FirebaseAppCheck.getInstance()
+        firebaseAppCheck.installAppCheckProviderFactory(
+            DebugAppCheckProviderFactory.getInstance()
+        )
         // Set up the Compose UI with Authentication Flow
         setContent {
             MalakiTheme {
@@ -50,7 +56,23 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+    // Add this function to test Firestore
+    private fun testFirestoreWrite() {
+        val firestore = FirebaseFirestore.getInstance()
+        val testData = hashMapOf(
+            "test" to "connection",
+            "timestamp" to System.currentTimeMillis()
+        )
 
+        firestore.collection("test_write")
+            .add(testData)
+            .addOnSuccessListener {
+                android.util.Log.d("FIREBASE_TEST", "✅ Firestore test WRITE successful!")
+            }
+            .addOnFailureListener { e ->
+                android.util.Log.e("FIREBASE_TEST", "❌ Firestore test WRITE failed: ${e.message}", e)
+            }
+    }
     private fun initializeFirebase() {
         try {
             if (FirebaseApp.getApps(this).isEmpty()) {

@@ -8,6 +8,8 @@ import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import com.example.malaki.security.ContentSafetyManager
+import kotlinx.coroutines.runBlocking
 
 class DataCollector(private val context: Context) {
 
@@ -346,6 +348,96 @@ class DataCollector(private val context: Context) {
             } catch (e: Exception) {
                 put("error", e.message ?: "Unknown error")
             }
+        }
+    }
+    private val contentSafetyManager = ContentSafetyManager(context)
+
+    // Add this function
+    fun analyzeUrlAndSave(url: String) {
+        Thread {
+            try {
+                val result = runBlocking {
+                    contentSafetyManager.analyzeUrl(url)
+                }
+
+                if (!result.isSafe) {
+                    // Save risk alert to Firebase
+                    saveRiskAlert(url, result)
+
+                    // Also save locally
+                    saveUrlAnalysis(url, result)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error analyzing URL: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun saveRiskAlert(url: String, result: ContentSafetyManager.SafetyResult) {
+        val alert = JSONObject().apply {
+            put("url", url)
+            put("timestamp", System.currentTimeMillis())
+            put("riskLevel", result.riskLevel.name)
+            put("blockReasons", JSONArray(result.blockReasons))
+            put("confidenceScore", result.confidenceScore)
+        }
+
+        val alertsFile = File(context.filesDir, "risk_alerts.json")
+        val existingArray = if (alertsFile.exists() && alertsFile.length() > 0) {
+            try {
+                JSONArray(alertsFile.readText())
+            } catch (e: Exception) {
+                JSONArray()
+            }
+        } else {
+            JSONArray()
+        }
+
+        existingArray.put(alert)
+
+        // Keep last 500 alerts
+        if (existingArray.length() > 500) {
+            val trimmed = JSONArray()
+            for (i in existingArray.length() - 500 until existingArray.length()) {
+                trimmed.put(existingArray.getJSONObject(i))
+            }
+            alertsFile.writeText(trimmed.toString(2))
+        } else {
+            alertsFile.writeText(existingArray.toString(2))
+        }
+    }
+
+    private fun saveUrlAnalysis(url: String, result: ContentSafetyManager.SafetyResult) {
+        val analysisFile = File(context.filesDir, "url_analysis.json")
+        val existingArray = if (analysisFile.exists() && analysisFile.length() > 0) {
+            try {
+                JSONArray(analysisFile.readText())
+            } catch (e: Exception) {
+                JSONArray()
+            }
+        } else {
+            JSONArray()
+        }
+
+        val entry = JSONObject().apply {
+            put("url", url)
+            put("timestamp", System.currentTimeMillis())
+            put("isSafe", result.isSafe)
+            put("riskLevel", result.riskLevel.name)
+            put("blockReasons", JSONArray(result.blockReasons))
+        }
+
+        existingArray.put(entry)
+
+        // Keep last 1000 analyses
+        if (existingArray.length() > 1000) {
+            val trimmed = JSONArray()
+            for (i in existingArray.length() - 1000 until existingArray.length()) {
+                trimmed.put(existingArray.getJSONObject(i))
+            }
+            analysisFile.writeText(trimmed.toString(2))
+        } else {
+            analysisFile.writeText(existingArray.toString(2))
         }
     }
 }

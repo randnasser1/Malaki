@@ -44,7 +44,33 @@ android {
     }
 
     buildFeatures {
+        buildConfig = true
         compose = true
+    }
+    // Add this to read API keys
+    // Read secrets.properties manually
+    val secretsFile = rootProject.file("secrets.properties")
+    val secrets = mutableMapOf<String, String>()
+    if (secretsFile.exists()) {
+        secretsFile.readLines().forEach { line ->
+            if (line.contains("=") && !line.startsWith("#")) {
+                val parts = line.split("=", limit = 2)
+                if (parts.size == 2) {
+                    secrets[parts[0].trim()] = parts[1].trim()
+                }
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            buildConfigField("String", "RAPIDAPI_KEY",
+                "\"${secrets["RAPIDAPI_KEY"] ?: ""}\"")
+        }
+        release {
+            buildConfigField("String", "RAPIDAPI_KEY",
+                "\"${secrets["RAPIDAPI_KEY"] ?: ""}\"")
+        }
     }
 }
 

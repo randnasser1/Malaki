@@ -440,4 +440,69 @@ class DataCollector(private val context: Context) {
             analysisFile.writeText(existingArray.toString(2))
         }
     }
+    // ========== NEW BROWSER HISTORY FUNCTIONS ==========
+
+    fun getBrowserHistory(limit: Int = 50): List<String> {
+        val browserFile = File(context.filesDir, "browser_history.txt")
+        if (!browserFile.exists()) return emptyList()
+
+        return browserFile.readLines()
+            .takeLast(limit)
+            .mapNotNull { line ->
+                val urlMatch = Regex("https?://[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=]+").find(line)
+                urlMatch?.value
+            }
+            .distinct()
+    }
+
+    fun getRecentBrowserHistory(limit: Int = 20): List<BrowserHistoryEntry> {
+        val browserFile = File(context.filesDir, "browser_history.txt")
+        if (!browserFile.exists()) return emptyList()
+
+        val entries = mutableListOf<BrowserHistoryEntry>()
+        val lines = browserFile.readLines().takeLast(limit)
+
+        val regex = Regex("\\[(.*?)\\] \\[(.*?)\\] \\[BROWSER\\] (.*)")
+
+        for (line in lines) {
+            val match = regex.find(line)
+            if (match != null) {
+                entries.add(
+                    BrowserHistoryEntry(
+                        timestamp = parseTimestamp(match.groupValues[1]),
+                        dateTime = match.groupValues[1],
+                        packageName = match.groupValues[2],
+                        url = match.groupValues[3]
+                    )
+                )
+            }
+        }
+
+        return entries.sortedByDescending { it.timestamp }
+    }
+
+    private fun parseTimestamp(dateTime: String): Long {
+        return try {
+            val format = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+            format.parse(dateTime)?.time ?: System.currentTimeMillis()
+        } catch (e: Exception) {
+            System.currentTimeMillis()
+        }
+    }
+
+    // Function to analyze all unanalyzed browser URLs
+    fun analyzeAllBrowserUrls() {
+        val browserHistory = getRecentBrowserHistory(30)
+        for (entry in browserHistory) {
+            Log.d(TAG, "🌐 Analyzing browser URL: ${entry.url}")
+            analyzeUrlAndSave(entry.url)
+        }
+    }
 }
+
+data class BrowserHistoryEntry(
+    val timestamp: Long,
+    val dateTime: String,
+    val packageName: String,
+    val url: String
+)

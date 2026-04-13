@@ -37,41 +37,47 @@ class ContentSafetyManager(private val context: Context) {
      * Analyze a URL (image or webpage) for unsafe content
      */
     suspend fun analyzeUrl(url: String): SafetyResult = withContext(Dispatchers.IO) {
-        Log.d(TAG, "Analyzing URL: $url")
+        Log.d(TAG, "🚀 PIPELINE START: Analyzing URL: $url")
+        Log.d(TAG, "🚀 PIPELINE STEP 1: URL received for analysis")
 
-        // First, check if it's an image URL or webpage
-        val isImage = url.matches(Regex(".*\\.(jpg|jpeg|png|gif|webp|bmp)(\\?.*)?$", RegexOption.IGNORE_CASE))
+        val result = analyzeWebpageUrl(url)
 
-        return@withContext if (isImage) {
-            analyzeImageUrl(url)
-        } else {
-            analyzeWebpageUrl(url)
-        }
-    }
+        Log.d(TAG, "🚀 PIPELINE STEP 6: Analysis complete")
+        Log.d(TAG, "   - Safe: ${result.isSafe}")
+        Log.d(TAG, "   - Risk Level: ${result.riskLevel}")
+        Log.d(TAG, "   - Reasons: ${result.blockReasons}")
+        Log.d(TAG, "   - Confidence: ${result.confidenceScore}")
 
-    private suspend fun analyzeImageUrl(url: String): SafetyResult {
-        // Use Google Vision API for images
-        return checkWithGoogleVision(url)
+        return@withContext result
     }
 
     private suspend fun analyzeWebpageUrl(url: String): SafetyResult {
-        // Use Jina Reader + RapidAPI for webpages
+        Log.d(TAG, "🚀 PIPELINE STEP 2: Extracting text with Jina...")
         val webpageText = extractTextWithJina(url)
 
         if (webpageText.isNullOrBlank()) {
+            // ⚠️ FALLBACK TRIGGERED ⚠️
+            Log.e(TAG, "⚠️⚠️⚠️ FALLBACK USED: No text extracted from webpage ⚠️⚠️⚠️")
+            Log.e(TAG, "   URL: $url")
+            Log.e(TAG, "   Returning SAFE with low confidence")
             return SafetyResult(
                 isSafe = true,
                 riskLevel = RiskLevel.SAFE,
-                blockReasons = emptyList(),
-                confidenceScore = 0.5f
+                blockReasons = listOf("Could not analyze: page content not accessible"),
+                confidenceScore = 0.3f
             )
         }
 
+        Log.d(TAG, "🚀 PIPELINE STEP 2 SUCCESS: Extracted ${webpageText.length} characters")
+        Log.d(TAG, "   Preview: ${webpageText.take(200)}...")
+
+        Log.d(TAG, "🚀 PIPELINE STEP 3: Calling RapidAPI...")
         return checkWithRapidApi(webpageText)
     }
 
     private suspend fun extractTextWithJina(url: String): String? {
         val jinaUrl = "https://r.jina.ai/${url}"
+        Log.d(TAG, "📡 Calling Jina Reader: $jinaUrl")
 
         val request = Request.Builder()
             .url(jinaUrl)
@@ -81,26 +87,25 @@ class ContentSafetyManager(private val context: Context) {
 
         return try {
             client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) response.body?.string() else null
+                if (response.isSuccessful) {
+                    val text = response.body?.string()
+                    Log.d(TAG, "✅ JINA SUCCESS: Extracted ${text?.length ?: 0} characters")
+                    text
+                } else {
+                    // ⚠️ FALLBACK TRIGGERED ⚠️
+                    Log.e(TAG, "⚠️⚠️⚠️ JINA FALLBACK: HTTP ${response.code} - returning null ⚠️⚠️⚠️")
+                    null
+                }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Jina extraction failed: ${e.message}")
+            // ⚠️ FALLBACK TRIGGERED ⚠️
+            Log.e(TAG, "⚠️⚠️⚠️ JINA FALLBACK: Exception - ${e.message} ⚠️⚠️⚠️")
             null
         }
     }
 
-    private suspend fun checkWithGoogleVision(url: String): SafetyResult {
-        // TODO: Implement Google Vision API call
-        // For now, return safe as placeholder
-        return SafetyResult(
-            isSafe = true,
-            riskLevel = RiskLevel.SAFE,
-            blockReasons = emptyList(),
-            confidenceScore = 0.8f
-        )
-    }
-
     private suspend fun checkWithRapidApi(text: String): SafetyResult {
+        Log.d(TAG, "🚀 PIPELINE STEP 3: Sending request to RapidAPI")
         val jsonBody = JSONObject(mapOf(
             "text" to text.take(5000),
             "detail_level" to "light"
@@ -119,12 +124,16 @@ class ContentSafetyManager(private val context: Context) {
         return try {
             val response = client.newCall(request).execute()
             if (response.isSuccessful) {
+                Log.d(TAG, "🚀 PIPELINE STEP 4: Received response from RapidAPI")
                 val responseBody = response.body?.string()
                 parseRapidApiResponse(responseBody)
             } else {
+                Log.e(TAG, "⚠️⚠️⚠️ FALLBACK USED: API returned error code ${response.code} ⚠️⚠️⚠️")
+                Log.e(TAG, "   This means the API call failed, returning SAFE default")
                 SafetyResult(true, RiskLevel.SAFE, emptyList(), 0.5f)
             }
         } catch (e: Exception) {
+            Log.e(TAG, "⚠️⚠️⚠️ FALLBACK USED: Exception occurred ⚠️⚠️⚠️")
             Log.e(TAG, "RapidAPI error: ${e.message}")
             SafetyResult(true, RiskLevel.SAFE, emptyList(), 0.5f)
         }

@@ -23,30 +23,6 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
-
-    buildTypes {
-        release {
-            isMinifyEnabled = false
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
-        }
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
-    buildFeatures {
-        buildConfig = true
-        compose = true
-    }
     // Add this to read API keys
     // Read secrets.properties manually
     val secretsFile = rootProject.file("secrets.properties")
@@ -64,14 +40,31 @@ android {
 
     buildTypes {
         debug {
-            buildConfigField("String", "RAPIDAPI_KEY",
-                "\"${secrets["RAPIDAPI_KEY"] ?: ""}\"")
+            buildConfigField("String", "RAPIDAPI_KEY", "\"${secrets["RAPIDAPI_KEY"] ?: ""}\"")
         }
         release {
-            buildConfigField("String", "RAPIDAPI_KEY",
-                "\"${secrets["RAPIDAPI_KEY"] ?: ""}\"")
+            isMinifyEnabled = false
+            buildConfigField("String", "RAPIDAPI_KEY", "\"${secrets["RAPIDAPI_KEY"] ?: ""}\"")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    buildFeatures {
+        buildConfig = true
+        compose = true
+    }
+
 }
 
 dependencies {

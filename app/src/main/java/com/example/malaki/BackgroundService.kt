@@ -42,6 +42,8 @@ class BackgroundService : Service() {
             dataCollector.saveMusicNotificationData()
             // NEW: Analyze URLs from collected data
             analyzeCollectedUrls()
+            // NEW: Analyze browser history URLs
+            dataCollector.analyzeAllBrowserUrls()
 
             Log.d(TAG, "✅ Auto-collection completed")
         } catch (e: Exception) {

@@ -8,6 +8,8 @@ import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import com.example.malaki.security.ContentSafetyManager
+import kotlinx.coroutines.runBlocking
 
 class DataCollector(private val context: Context) {
 
@@ -348,4 +350,159 @@ class DataCollector(private val context: Context) {
             }
         }
     }
+    private val contentSafetyManager = ContentSafetyManager(context)
+
+    // Add this function
+    fun analyzeUrlAndSave(url: String) {
+        Thread {
+            try {
+                val result = runBlocking {
+                    contentSafetyManager.analyzeUrl(url)
+                }
+
+                if (!result.isSafe) {
+                    // Save risk alert to Firebase
+                    saveRiskAlert(url, result)
+
+                    // Also save locally
+                    saveUrlAnalysis(url, result)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error analyzing URL: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun saveRiskAlert(url: String, result: ContentSafetyManager.SafetyResult) {
+        val alert = JSONObject().apply {
+            put("url", url)
+            put("timestamp", System.currentTimeMillis())
+            put("riskLevel", result.riskLevel.name)
+            put("blockReasons", JSONArray(result.blockReasons))
+            put("confidenceScore", result.confidenceScore)
+        }
+
+        val alertsFile = File(context.filesDir, "risk_alerts.json")
+        val existingArray = if (alertsFile.exists() && alertsFile.length() > 0) {
+            try {
+                JSONArray(alertsFile.readText())
+            } catch (e: Exception) {
+                JSONArray()
+            }
+        } else {
+            JSONArray()
+        }
+
+        existingArray.put(alert)
+
+        // Keep last 500 alerts
+        if (existingArray.length() > 500) {
+            val trimmed = JSONArray()
+            for (i in existingArray.length() - 500 until existingArray.length()) {
+                trimmed.put(existingArray.getJSONObject(i))
+            }
+            alertsFile.writeText(trimmed.toString(2))
+        } else {
+            alertsFile.writeText(existingArray.toString(2))
+        }
+    }
+
+    private fun saveUrlAnalysis(url: String, result: ContentSafetyManager.SafetyResult) {
+        val analysisFile = File(context.filesDir, "url_analysis.json")
+        val existingArray = if (analysisFile.exists() && analysisFile.length() > 0) {
+            try {
+                JSONArray(analysisFile.readText())
+            } catch (e: Exception) {
+                JSONArray()
+            }
+        } else {
+            JSONArray()
+        }
+
+        val entry = JSONObject().apply {
+            put("url", url)
+            put("timestamp", System.currentTimeMillis())
+            put("isSafe", result.isSafe)
+            put("riskLevel", result.riskLevel.name)
+            put("blockReasons", JSONArray(result.blockReasons))
+        }
+
+        existingArray.put(entry)
+
+        // Keep last 1000 analyses
+        if (existingArray.length() > 1000) {
+            val trimmed = JSONArray()
+            for (i in existingArray.length() - 1000 until existingArray.length()) {
+                trimmed.put(existingArray.getJSONObject(i))
+            }
+            analysisFile.writeText(trimmed.toString(2))
+        } else {
+            analysisFile.writeText(existingArray.toString(2))
+        }
+    }
+    // ========== NEW BROWSER HISTORY FUNCTIONS ==========
+
+    fun getBrowserHistory(limit: Int = 50): List<String> {
+        val browserFile = File(context.filesDir, "browser_history.txt")
+        if (!browserFile.exists()) return emptyList()
+
+        return browserFile.readLines()
+            .takeLast(limit)
+            .mapNotNull { line ->
+                val urlMatch = Regex("https?://[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=]+").find(line)
+                urlMatch?.value
+            }
+            .distinct()
+    }
+
+    fun getRecentBrowserHistory(limit: Int = 20): List<BrowserHistoryEntry> {
+        val browserFile = File(context.filesDir, "browser_history.txt")
+        if (!browserFile.exists()) return emptyList()
+
+        val entries = mutableListOf<BrowserHistoryEntry>()
+        val lines = browserFile.readLines().takeLast(limit)
+
+        val regex = Regex("\\[(.*?)\\] \\[(.*?)\\] \\[BROWSER\\] (.*)")
+
+        for (line in lines) {
+            val match = regex.find(line)
+            if (match != null) {
+                entries.add(
+                    BrowserHistoryEntry(
+                        timestamp = parseTimestamp(match.groupValues[1]),
+                        dateTime = match.groupValues[1],
+                        packageName = match.groupValues[2],
+                        url = match.groupValues[3]
+                    )
+                )
+            }
+        }
+
+        return entries.sortedByDescending { it.timestamp }
+    }
+
+    private fun parseTimestamp(dateTime: String): Long {
+        return try {
+            val format = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+            format.parse(dateTime)?.time ?: System.currentTimeMillis()
+        } catch (e: Exception) {
+            System.currentTimeMillis()
+        }
+    }
+
+    // Function to analyze all unanalyzed browser URLs
+    fun analyzeAllBrowserUrls() {
+        val browserHistory = getRecentBrowserHistory(30)
+        for (entry in browserHistory) {
+            Log.d(TAG, "🌐 Analyzing browser URL: ${entry.url}")
+            analyzeUrlAndSave(entry.url)
+        }
+    }
 }
+
+data class BrowserHistoryEntry(
+    val timestamp: Long,
+    val dateTime: String,
+    val packageName: String,
+    val url: String
+)

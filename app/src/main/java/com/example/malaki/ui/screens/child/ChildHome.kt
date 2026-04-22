@@ -37,6 +37,8 @@ fun ChildHome(
     var showAngel by remember { mutableStateOf(true) }
     var showSuccess by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    val authManager = remember { com.example.malaki.auth.AuthManager(context) }
+    val childName = authManager.getChildName()
 
     val selectedMoodData = moodOptions.find { it.first == selectedMood }
 
@@ -78,8 +80,9 @@ fun ChildHome(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
-                TextButton(onClick = { onNavigate("parent") }) {
-                    Text("Parent View", color = Color(0xFF9CA3AF), fontSize = 12.sp)
+                // Add logout button
+                TextButton(onClick = { onNavigate("logout") }) {
+                    Text("🚪 Logout", color = Color(0xFFEF4444), fontSize = 12.sp)
                 }
             }
 
@@ -99,6 +102,14 @@ fun ChildHome(
             Spacer(modifier = Modifier.height(32.dp))
 
             // Greeting
+            Text(
+                text = "Hi $childName! 👋",
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF1F2937),
+                modifier = Modifier.padding(top = 16.dp)
+            )
+
             Text(
                 text = "How are you feeling today?",
                 style = MaterialTheme.typography.headlineMedium,

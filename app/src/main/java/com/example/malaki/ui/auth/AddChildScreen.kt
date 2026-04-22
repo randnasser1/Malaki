@@ -2,28 +2,29 @@ package com.example.malaki.ui.auth
 
 import android.widget.Toast
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.FirebaseFirestore
+import com.example.malaki.auth.AuthManager
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.style.TextAlign
+import android.content.Context
 
 @Composable
 fun AddChildScreen(
-    parentId: String,
+    authManager: AuthManager,
     onChildAdded: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -37,9 +38,6 @@ fun AddChildScreen(
 
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-
-    val auth = FirebaseAuth.getInstance()
-    val firestore = FirebaseFirestore.getInstance()
 
     fun validateForm(): Boolean {
         when {
@@ -56,11 +54,11 @@ fun AddChildScreen(
                 return false
             }
             childPin.isBlank() -> {
-                errorMessage = "Please create a PIN for your child (4-6 digits)"
+                errorMessage = "Please create a PIN for your child"
                 return false
             }
-            childPin.length < 4 -> {
-                errorMessage = "PIN must be at least 4 digits"
+            childPin.length != 6 -> {
+                errorMessage = "PIN must be exactly 6 digits"
                 return false
             }
             childPin != confirmPin -> {
@@ -74,7 +72,8 @@ fun AddChildScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // Back button
@@ -86,7 +85,6 @@ fun AddChildScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Title
         Text(
             text = "Add Child",
             fontSize = 28.sp,
@@ -97,7 +95,7 @@ fun AddChildScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
-            text = "Add another child to monitor",
+            text = "Add a child to monitor",
             fontSize = 14.sp,
             color = Color.Gray
         )
@@ -129,12 +127,12 @@ fun AddChildScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Child PIN
+        // Child PIN (6 digits exactly)
         OutlinedTextField(
             value = childPin,
-            onValueChange = { childPin = it.take(6) },
-            label = { Text("Child's PIN (4-6 digits)") },
-            placeholder = { Text("e.g., 1234") },
+            onValueChange = { if (it.length <= 6 && it.all { char -> char.isDigit() }) childPin = it },
+            label = { Text("Child's PIN (6 digits)") },
+            placeholder = { Text("e.g., 123456") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
             visualTransformation = PasswordVisualTransformation(),
             modifier = Modifier.fillMaxWidth(),
@@ -147,7 +145,7 @@ fun AddChildScreen(
         // Confirm PIN
         OutlinedTextField(
             value = confirmPin,
-            onValueChange = { confirmPin = it.take(6) },
+            onValueChange = { if (it.length <= 6 && it.all { char -> char.isDigit() }) confirmPin = it },
             label = { Text("Confirm PIN") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
             visualTransformation = PasswordVisualTransformation(),
@@ -158,7 +156,6 @@ fun AddChildScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Error message
         errorMessage?.let {
             Text(
                 text = it,
@@ -176,69 +173,43 @@ fun AddChildScreen(
                         isLoading = true
                         errorMessage = null
 
-                        try {
-                            // Create child account (anonymous)
-                            val childAuth = auth.signInAnonymously().await()
-                            val childId = childAuth.user?.uid
+                        val parentId = authManager.currentUser?.uid
+                        val parentEmail = authManager.currentUser?.email
 
-                            if (childId != null) {
-                                // Save child data
-                                val childData = hashMapOf(
-                                    "userId" to childId,
-                                    "name" to childName,
-                                    "age" to childAge.toInt(),
-                                    "pinCode" to childPin,
-                                    "userType" to "CHILD",
-                                    "parentId" to parentId,
-                                    "createdAt" to System.currentTimeMillis()
-                                )
+                        if (parentId == null || parentEmail == null) {
+                            errorMessage = "Parent session expired. Please log in again."
+                            isLoading = false
+                            return@launch
+                        }
 
-                                firestore.collection("users")
-                                    .document(childId)
-                                    .set(childData)
-                                    .await()
+                        val prefs = context.getSharedPreferences("auth_prefs", Context.MODE_PRIVATE)
+                        val parentPassword = prefs.getString("parent_password", null)
 
-                                // Update parent document with childId
-                                firestore.collection("users")
-                                    .document(parentId)
-                                    .update("childId", childId)
-                                    .await()
+                        if (parentPassword == null) {
+                            errorMessage = "Please log in again to add a child"
+                            isLoading = false
+                            return@launch
+                        }
 
-                                // Generate connection code
-                                val connectionCode = String.format("%06d", (100000..999999).random())
-                                val codeData = hashMapOf(
-                                    "code" to connectionCode,
-                                    "parentId" to parentId,
-                                    "childId" to childId,
-                                    "createdAt" to System.currentTimeMillis(),
-                                    "expiresAt" to System.currentTimeMillis() + (24 * 60 * 60 * 1000),
-                                    "used" to false
-                                )
+                        val result = authManager.createChildAccount(
+                            parentId = parentId,
+                            parentEmail = parentEmail,
+                            parentPassword = parentPassword,
+                            childName = childName,
+                            childAge = childAge.toInt(),
+                            childPin = childPin
+                        )
 
-                                firestore.collection("connection_codes")
-                                    .document(connectionCode)
-                                    .set(codeData)
-                                    .await()
+                        isLoading = false
 
-                                // Sign back in as parent
-                                val currentUser = auth.currentUser
-                                if (currentUser != null && currentUser.isAnonymous) {
-                                    // Re-authenticate as parent if needed
-                                    // For now, just show success
-                                }
-
-                                Toast.makeText(
-                                    context,
-                                    "Child added! Share code: $connectionCode",
-                                    Toast.LENGTH_LONG
-                                ).show()
-
+                        when (result) {
+                            is com.example.malaki.auth.ChildCreationResult.Success -> {
+                                Toast.makeText(context, "Child added successfully!", Toast.LENGTH_LONG).show()
                                 onChildAdded()
                             }
-                        } catch (e: Exception) {
-                            errorMessage = e.message ?: "Failed to add child"
-                        } finally {
-                            isLoading = false
+                            is com.example.malaki.auth.ChildCreationResult.Error -> {
+                                errorMessage = result.message
+                            }
                         }
                     }
                 }
@@ -258,14 +229,11 @@ fun AddChildScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Info note
         Text(
-            text = "Your child will get a connection code to log in",
+            text = "Your child will use this 6-digit PIN to log in",
             fontSize = 12.sp,
             color = Color.Gray,
             textAlign = TextAlign.Center
         )
     }
 }
-
-// Add missing imports

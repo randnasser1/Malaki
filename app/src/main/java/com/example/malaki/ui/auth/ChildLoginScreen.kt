@@ -19,7 +19,6 @@ import kotlinx.coroutines.launch
 fun ChildLoginScreen(
     onLoginSuccess: () -> Unit,
     onBack: () -> Unit,
-    onNeedCode: () -> Unit,
     authManager: com.example.malaki.auth.AuthManager
 ) {
     var pinCode by remember { mutableStateOf("") }
@@ -34,7 +33,6 @@ fun ChildLoginScreen(
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Back button
         Row(modifier = Modifier.fillMaxWidth()) {
             TextButton(onClick = onBack) {
                 Text("← Back", color = Color(0xFF6B7280))
@@ -43,7 +41,6 @@ fun ChildLoginScreen(
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // Title
         Text(
             text = "Child Login",
             fontSize = 28.sp,
@@ -54,14 +51,13 @@ fun ChildLoginScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
-            text = "Enter your PIN code to access your safe space",
+            text = "Enter your 6-digit PIN code",
             fontSize = 14.sp,
             color = Color(0xFF6B7280)
         )
 
         Spacer(modifier = Modifier.height(48.dp))
 
-        // PIN Field
         OutlinedTextField(
             value = pinCode,
             onValueChange = {
@@ -70,7 +66,7 @@ fun ChildLoginScreen(
                 }
             },
             label = { Text("PIN Code") },
-            placeholder = { Text("000000") },
+            placeholder = { Text("123456") },
             visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
             modifier = Modifier.fillMaxWidth(),
@@ -84,7 +80,6 @@ fun ChildLoginScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Error Message
         errorMessage?.let {
             Text(
                 text = it,
@@ -94,7 +89,6 @@ fun ChildLoginScreen(
             )
         }
 
-        // Login Button
         Button(
             onClick = {
                 scope.launch {
@@ -126,14 +120,5 @@ fun ChildLoginScreen(
         }
 
         Spacer(modifier = Modifier.height(24.dp))
-
-        // Need connection code link
-        TextButton(onClick = onNeedCode) {
-            Text(
-                "Don't have a PIN? Ask your parent for the connection code",
-                color = Color(0xFFF59E0B),
-                fontSize = 12.sp
-            )
-        }
     }
 }

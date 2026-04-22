@@ -86,7 +86,9 @@ fun ParentDashboard(
     ) {
         // Header
         item {
-            Column {
+            Column(
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 Text(
                     text = "Wellbeing Dashboard",
                     style = MaterialTheme.typography.headlineMedium,
@@ -98,17 +100,35 @@ fun ParentDashboard(
                     color = Color(0xFF6B7280),
                     fontSize = 14.sp
                 )
+
                 Spacer(modifier = Modifier.height(16.dp))
-                // Add this button in the header section
+
+                // Add Child Button
                 Button(
                     onClick = { onNavigate("addChild") },
                     shape = RoundedCornerShape(50),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color(0xFF10B981),
                         contentColor = Color.White
-                    )
+                    ),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("+ Add Child")
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // LOGOUT BUTTON - Make it prominent
+                Button(
+                    onClick = { onNavigate("logout") },
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFEF4444),
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("🚪 Sign Out")
                 }
             }
         }

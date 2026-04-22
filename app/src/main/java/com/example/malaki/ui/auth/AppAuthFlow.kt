@@ -35,8 +35,6 @@ sealed class AuthScreen {
     data object AddChild : AuthScreen()
     data object ChildLogin : AuthScreen()
     data object ParentRegister : AuthScreen()
-    data object GenerateCode : AuthScreen()
-    data object ConnectCode : AuthScreen()
     data object ParentHome : AuthScreen()
     data object ChildHome : AuthScreen()
 }
@@ -92,14 +90,9 @@ fun AppAuthFlow(
                         onLoginSuccess = {
                             isLoggedIn = authManager.isLoggedIn
                             userType = authManager.currentUserType
-                            if (authManager.linkedParentId != null) {
-                                currentScreen = AuthScreen.ChildHome
-                            } else {
-                                currentScreen = AuthScreen.ConnectCode
-                            }
+                            currentScreen = AuthScreen.ChildHome
                         },
                         onBack = { currentScreen = AuthScreen.UserType },
-                        onNeedCode = { currentScreen = AuthScreen.ConnectCode },
                         authManager = authManager
                     )
                 }
@@ -113,31 +106,10 @@ fun AppAuthFlow(
                     )
                 }
 
-                AuthScreen.GenerateCode -> {
-                    GenerateCodeScreen(
-                        onCodeGenerated = { code ->
-                            // Code generated successfully
-                        },
-                        onBack = { currentScreen = AuthScreen.ParentHome },
-                        authManager = authManager
-                    )
-                }
-
-                AuthScreen.ConnectCode -> {
-                    ConnectCodeScreen(
-                        onConnectionSuccess = {
-                            currentScreen = AuthScreen.ChildHome
-                        },
-                        onBack = { currentScreen = AuthScreen.ChildLogin },
-                        authManager = authManager
-                    )
-                }
-
                 AuthScreen.ParentHome -> {
                     ParentDashboard(
                         onNavigate = { view ->
                             when (view) {
-                                "generateCode" -> currentScreen = AuthScreen.GenerateCode
                                 "addChild" -> currentScreen = AuthScreen.AddChild
                                 "logout" -> {
                                     authManager.logout()
@@ -150,10 +122,9 @@ fun AppAuthFlow(
                     )
                 }
 
-// Add new screen
                 AuthScreen.AddChild -> {
                     AddChildScreen(
-                        parentId = authManager.currentUser?.uid ?: "",
+                        authManager = authManager,
                         onChildAdded = {
                             currentScreen = AuthScreen.ParentHome
                         },
@@ -179,4 +150,3 @@ fun AppAuthFlow(
         }
     }
 }
-

@@ -1,0 +1,104 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.compose'
+    id 'com.google.gms.google-services'
+    id 'com.chaquo.python'
+}
+
+android {
+    namespace 'com.example.malaki'  // Change to your actual package name
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.example.malaki"  // Change to your actual package name
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        ndk {
+            abiFilters "arm64-v8a", "armeabi-v7a", "x86_64"
+        }
+
+        // In app/build.gradle
+
+        python {
+            buildPython "C:\\Users\\Lenovo\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe"
+
+            pip {
+                // REMOVE: torch, transformers, tokenizers (These won't work via pip in Chaquopy)
+
+                // KEEP: Pure Python libraries or libraries Chaquopy supports natively
+                install "tqdm"
+                install "requests"
+                install "packaging"
+                install "pyyaml"
+                install "regex"
+                install "filelock"
+                install "numpy" // Chaquopy supports numpy natively
+            }
+        }
+
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.10.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'androidx.activity:activity-ktx:1.8.0'
+
+    implementation 'com.squareup.okhttp3:okhttp:4.11.0'
+    implementation 'com.google.code.gson:gson:2.10.1'
+
+    implementation platform('com.google.firebase:firebase-bom:33.7.0')
+    implementation 'com.google.firebase:firebase-analytics'
+    implementation 'com.google.firebase:firebase-auth'
+    implementation 'com.google.firebase:firebase-firestore'
+    implementation 'com.google.firebase:firebase-messaging'
+    implementation 'com.google.firebase:firebase-storage'
+    implementation 'com.google.firebase:firebase-appcheck-debug:17.0.0'
+
+    def composeBom = platform('androidx.compose:compose-bom:2024.06.00')
+    implementation composeBom
+    androidTestImplementation composeBom
+
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.foundation:foundation'
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-tooling-preview'
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+
+    implementation 'androidx.activity:activity-compose:1.9.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.0'
+
+    implementation 'androidx.navigation:navigation-compose:2.7.7'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+    implementation("org.pytorch:executorch-android:0.6.0-rc1")
+    implementation("com.facebook.soloader:soloader:0.10.5")
+    implementation("com.facebook.fbjni:fbjni:0.5.1")
+
+}

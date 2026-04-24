@@ -1,0 +1,12 @@
+torch==1.8.1
+transformers==4.36.0
+tokenizers==0.15.2
+tqdm
+requests
+packaging
+pyyaml
+regex
+filelock
+numpy
+huggingface-hub==0.19.4
+sentencepiece

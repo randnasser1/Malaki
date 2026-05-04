@@ -27,6 +27,9 @@ class AuthManager(private val context: Context) {
     val currentUser: FirebaseUser?
         get() = auth.currentUser
 
+    val currentUserId: String?
+        get() = auth.currentUser?.uid ?: prefs.getString(KEY_USER_ID, null)
+
     val currentUserType: UserType
         get() {
             val type = prefs.getString(KEY_USER_TYPE, "NONE")

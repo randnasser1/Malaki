@@ -10,7 +10,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
@@ -22,6 +26,7 @@ fun ChildLoginScreen(
     authManager: com.example.malaki.auth.AuthManager
 ) {
     var pinCode by remember { mutableStateOf("") }
+    var pinVisible by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
@@ -66,9 +71,16 @@ fun ChildLoginScreen(
                 }
             },
             label = { Text("PIN Code") },
-            placeholder = { Text("123456") },
-            visualTransformation = PasswordVisualTransformation(),
+            visualTransformation = if (pinVisible) VisualTransformation.None else PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            trailingIcon = {
+                IconButton(onClick = { pinVisible = !pinVisible }) {
+                    Icon(
+                        imageVector = if (pinVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                        contentDescription = if (pinVisible) "Hide PIN" else "Show PIN"
+                    )
+                }
+            },
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
             singleLine = true,

@@ -1,6 +1,5 @@
 package com.example.malaki.ui.auth
 
-import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -14,13 +13,26 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.malaki.auth.AuthManager
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import android.content.Context
+
+internal suspend fun generateUniquePin(): String {
+    val firestore = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+    while (true) {
+        val pin = String.format("%06d", (100000..999999).random())
+        val existing = firestore.collection("users")
+            .whereEqualTo("pinCode", pin)
+            .limit(1)
+            .get()
+            .await()
+        if (existing.isEmpty) return pin
+    }
+}
 
 @Composable
 fun AddChildScreen(
@@ -33,11 +45,9 @@ fun AddChildScreen(
 
     var childName by remember { mutableStateOf("") }
     var childAge by remember { mutableStateOf("") }
-    var childPin by remember { mutableStateOf("") }
-    var confirmPin by remember { mutableStateOf("") }
-
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var generatedPin by remember { mutableStateOf<String?>(null) }
 
     fun validateForm(): Boolean {
         when {
@@ -53,20 +63,40 @@ fun AddChildScreen(
                 errorMessage = "Child age must be between 4 and 17"
                 return false
             }
-            childPin.isBlank() -> {
-                errorMessage = "Please create a PIN for your child"
-                return false
-            }
-            childPin.length != 6 -> {
-                errorMessage = "PIN must be exactly 6 digits"
-                return false
-            }
-            childPin != confirmPin -> {
-                errorMessage = "PINs do not match"
-                return false
-            }
         }
         return true
+    }
+
+    generatedPin?.let { pin ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Child Account Created!") },
+            text = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Share this PIN with ${childName} so they can log in:")
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = pin,
+                        fontSize = 36.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 8.sp,
+                        color = Color(0xFF10B981)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "You can view this PIN anytime from your dashboard.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6B7280),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = { generatedPin = null; onChildAdded() }) {
+                    Text("Done")
+                }
+            }
+        )
     }
 
     Column(
@@ -76,7 +106,6 @@ fun AddChildScreen(
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Back button
         Row(modifier = Modifier.fillMaxWidth()) {
             TextButton(onClick = onBack) {
                 Text("← Back", color = MaterialTheme.colorScheme.primary)
@@ -94,15 +123,10 @@ fun AddChildScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        Text(
-            text = "Add a child to monitor",
-            fontSize = 14.sp,
-            color = Color.Gray
-        )
+        Text(text = "Add a child to monitor", fontSize = 14.sp, color = Color.Gray)
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // Child Name
         OutlinedTextField(
             value = childName,
             onValueChange = { childName = it },
@@ -114,41 +138,11 @@ fun AddChildScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Child Age
         OutlinedTextField(
             value = childAge,
             onValueChange = { childAge = it },
             label = { Text("Child's Age") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Child PIN (6 digits exactly)
-        OutlinedTextField(
-            value = childPin,
-            onValueChange = { if (it.length <= 6 && it.all { char -> char.isDigit() }) childPin = it },
-            label = { Text("Child's PIN (6 digits)") },
-            placeholder = { Text("e.g., 123456") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-            visualTransformation = PasswordVisualTransformation(),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Confirm PIN
-        OutlinedTextField(
-            value = confirmPin,
-            onValueChange = { if (it.length <= 6 && it.all { char -> char.isDigit() }) confirmPin = it },
-            label = { Text("Confirm PIN") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-            visualTransformation = PasswordVisualTransformation(),
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
             singleLine = true
@@ -165,7 +159,6 @@ fun AddChildScreen(
             )
         }
 
-        // Add Child Button
         Button(
             onClick = {
                 scope.launch {
@@ -191,21 +184,22 @@ fun AddChildScreen(
                             return@launch
                         }
 
+                        val pin = generateUniquePin()
+
                         val result = authManager.createChildAccount(
                             parentId = parentId,
                             parentEmail = parentEmail,
                             parentPassword = parentPassword,
                             childName = childName,
                             childAge = childAge.toInt(),
-                            childPin = childPin
+                            childPin = pin
                         )
 
                         isLoading = false
 
                         when (result) {
                             is com.example.malaki.auth.ChildCreationResult.Success -> {
-                                Toast.makeText(context, "Child added successfully!", Toast.LENGTH_LONG).show()
-                                onChildAdded()
+                                generatedPin = pin
                             }
                             is com.example.malaki.auth.ChildCreationResult.Error -> {
                                 errorMessage = result.message
@@ -230,7 +224,7 @@ fun AddChildScreen(
         Spacer(modifier = Modifier.height(16.dp))
 
         Text(
-            text = "Your child will use this 6-digit PIN to log in",
+            text = "A unique 6-digit PIN will be generated for your child to log in.",
             fontSize = 12.sp,
             color = Color.Gray,
             textAlign = TextAlign.Center

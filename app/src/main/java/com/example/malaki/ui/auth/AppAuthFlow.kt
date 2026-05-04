@@ -26,6 +26,9 @@ import androidx.compose.ui.unit.sp
 import com.example.malaki.auth.AuthManager
 import com.example.malaki.auth.UserType
 import com.example.malaki.ui.screens.child.ChildHome
+import com.example.malaki.ui.screens.child.ChildSettingsScreen
+import com.example.malaki.ui.screens.child.JournalView
+import com.example.malaki.ui.screens.child.MoodCalendar
 import com.example.malaki.ui.screens.parent.ParentDashboard
 import com.example.malaki.ui.theme.MalakiTheme
 
@@ -37,6 +40,9 @@ sealed class AuthScreen {
     data object ParentRegister : AuthScreen()
     data object ParentHome : AuthScreen()
     data object ChildHome : AuthScreen()
+    data object ChildSettings : AuthScreen()
+    data object ChildJournal : AuthScreen()
+    data object ChildCalendar : AuthScreen()
 }
 
 @Composable
@@ -136,13 +142,35 @@ fun AppAuthFlow(
                     ChildHome(
                         onNavigate = { view ->
                             when (view) {
+                                "settings" -> currentScreen = AuthScreen.ChildSettings
+                                "journal" -> currentScreen = AuthScreen.ChildJournal
+                                "calendar" -> currentScreen = AuthScreen.ChildCalendar
                                 "logout" -> {
                                     authManager.logout()
                                     isLoggedIn = false
                                     currentScreen = AuthScreen.UserType
                                 }
-                                else -> { /* Handle other navigation */ }
                             }
+                        }
+                    )
+                }
+
+                AuthScreen.ChildSettings -> {
+                    ChildSettingsScreen(onBack = { currentScreen = AuthScreen.ChildHome })
+                }
+
+                AuthScreen.ChildJournal -> {
+                    JournalView(
+                        onNavigate = { view ->
+                            if (view == "child") currentScreen = AuthScreen.ChildHome
+                        }
+                    )
+                }
+
+                AuthScreen.ChildCalendar -> {
+                    MoodCalendar(
+                        onNavigate = { view ->
+                            if (view == "child") currentScreen = AuthScreen.ChildHome
                         }
                     )
                 }

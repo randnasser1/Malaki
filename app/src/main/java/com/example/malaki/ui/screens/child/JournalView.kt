@@ -19,7 +19,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.malaki.db.EventRepository
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -37,13 +41,15 @@ fun JournalView(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val repository = remember { EventRepository(context) }
     val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
     val randomPrompt = remember { journalPrompts.random() }
 
     var text by remember { mutableStateOf("") }
     var saved by remember { mutableStateOf(false) }
 
-    // Load existing journal entry
+    // Load existing journal entry from SharedPrefs
     LaunchedEffect(Unit) {
         val prefs = context.getSharedPreferences("app_prefs", android.content.Context.MODE_PRIVATE)
         val journals = prefs.getString("journals", "{}") ?: "{}"
@@ -53,7 +59,6 @@ fun JournalView(
         }
     }
 
-    // Auto-dismiss saved message
     LaunchedEffect(saved) {
         if (saved) {
             delay(2000)
@@ -72,11 +77,49 @@ fun JournalView(
     )
 
     fun handleSave() {
+        if (text.isBlank()) return
+
+        // 1. SharedPrefs (existing — for MoodCalendar display)
         val prefs = context.getSharedPreferences("app_prefs", android.content.Context.MODE_PRIVATE)
         val journals = prefs.getString("journals", "{}") ?: "{}"
         val journalsMap = org.json.JSONObject(journals)
         journalsMap.put(today, text)
         prefs.edit().putString("journals", journalsMap.toString()).apply()
+
+        // 2. Firestore — users/{childId}/journals/{date}
+        scope.launch {
+            try {
+                val uid = FirebaseAuth.getInstance().currentUser?.uid
+                if (uid != null) {
+                    FirebaseFirestore.getInstance()
+                        .collection("users").document(uid)
+                        .collection("journals").document(today)
+                        .set(
+                            mapOf(
+                                "date" to today,
+                                "text" to text,
+                                "timestamp" to System.currentTimeMillis()
+                            )
+                        )
+                }
+            } catch (_: Exception) {}
+        }
+
+        // 3. Room — journal_entry + captured_event(JOURNAL) for ML pipeline
+        scope.launch {
+            try {
+                repository.ensureDeviceProfile()
+                // Read today's mood from SharedPrefs so we can attach it to the entry
+                val moodsJson = prefs.getString("moods", "{}") ?: "{}"
+                val todayMood = org.json.JSONObject(moodsJson).optString(today, "").ifBlank { null }
+                repository.captureJournalEntry(
+                    entryText = text,
+                    moodLabel = todayMood,
+                    timestampUtc = System.currentTimeMillis()
+                )
+            } catch (_: Exception) {}
+        }
+
         saved = true
     }
 

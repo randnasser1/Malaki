@@ -16,10 +16,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.malaki.db.EventRepository
 import com.example.malaki.ui.components.SuccessState
 import com.example.malaki.ui.components.angel.Angel
 import com.example.malaki.ui.components.angel.AngelVariant
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 val moodOptions = listOf(
     Triple("great", "😊", Color(0xFFE8F5A8)),
     Triple("good", "👍", Color(0xFFF3D97F)),
@@ -39,12 +41,32 @@ fun ChildHome(
     val context = LocalContext.current
     val authManager = remember { com.example.malaki.auth.AuthManager(context) }
     val childName = authManager.getChildName()
+    val repository = remember { EventRepository(context) }
 
     val selectedMoodData = moodOptions.find { it.first == selectedMood }
 
     val gradient = Brush.verticalGradient(
         colors = listOf(Color(0xFFFFF8E7), Color.White)
     )
+
+    fun saveMoodToFirestore(date: String, mood: String) {
+        val childId = authManager.currentUser?.uid ?: run {
+
+        android.util.Log.e("MOOD", "❌ No child ID — Firebase Auth session may be null")
+            return
+        }
+        val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+        val moodData = hashMapOf(
+            "date" to date,
+            "mood" to mood,
+            "timestamp" to System.currentTimeMillis()
+        )
+        db.collection("users").document(childId)
+            .collection("moods").document(date)
+            .set(moodData)
+            .addOnSuccessListener { android.util.Log.d("MOOD", "✅ Mood saved to Firestore for $childId") }
+            .addOnFailureListener { android.util.Log.e("MOOD", "❌ Mood save failed for $childId: ${it.message}") }
+    }
 
     fun handleMoodSelect(moodId: String) {
         selectedMood = moodId
@@ -54,17 +76,50 @@ fun ChildHome(
         val prefs = context.getSharedPreferences("app_prefs", android.content.Context.MODE_PRIVATE)
         val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
             .format(java.util.Date())
+
+        // Save to SharedPrefs
         val moods = prefs.getString("moods", "{}") ?: "{}"
         val moodsMap = org.json.JSONObject(moods)
         moodsMap.put(today, moodId)
         prefs.edit().putString("moods", moodsMap.toString()).apply()
 
-        kotlinx.coroutines.GlobalScope.launch {
-            kotlinx.coroutines.delay(2000)
-            showSuccess = false
-        }
-    }
+        // Save to Firestore
+        val childId = authManager.currentUser?.uid
+        if (childId != null) {
+            val sentimentScore = when (moodId) {
+                "great" -> 1.0
+                "good" -> 0.75
+                "okay" -> 0.5
+                "anxious" -> 0.35
+                "sad" -> 0.2
+                else -> 0.5
+            }
 
+            val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+            val summaryData = hashMapOf(
+                "childId" to childId,
+                "date" to today,
+                "avg_sentiment" to sentimentScore,
+                "dominantEmotion" to moodId,
+                "timestamp" to System.currentTimeMillis()
+            )
+
+            db.collection("wellbeing_daily_summary")
+                .document("${childId}_$today")
+                .set(summaryData)
+                .addOnSuccessListener {
+                    android.util.Log.d("WELLBEING", "✅ Saved to Firestore!")
+                }
+                .addOnFailureListener { e ->
+                    android.util.Log.e("WELLBEING", "❌ Firestore error: ${e.message}")
+                }
+        }
+
+        // Hide success message after 2 seconds - FIXED: Use Handler instead of runOnUiThread
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            showSuccess = false
+        }, 2000)
+    }
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -75,12 +130,16 @@ fun ChildHome(
             modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Parent access button
+
+            // Top bar buttons
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                // Add logout button
+                TextButton(onClick = { onNavigate("settings") }) {
+                    Text("⚙️ Settings", color = Color(0xFF6B7280), fontSize = 12.sp)
+                }
                 TextButton(onClick = { onNavigate("logout") }) {
                     Text("🚪 Logout", color = Color(0xFFEF4444), fontSize = 12.sp)
                 }

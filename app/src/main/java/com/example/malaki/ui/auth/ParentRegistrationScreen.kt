@@ -13,7 +13,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.firebase.auth.FirebaseAuth
@@ -34,20 +38,25 @@ private suspend fun registerUser(
     fullName: String,
     childName: String,
     childAge: String,
-    childPin: String,
-    onSuccess: () -> Unit,
+    onSuccess: (generatedPin: String) -> Unit,
     onError: (String) -> Unit
 ) {
     try {
         val auth = FirebaseAuth.getInstance()
         val firestore = FirebaseFirestore.getInstance()
+        val childPin = generateUniquePin()
+        val childEmail = "child_${System.currentTimeMillis()}@malaki.child"
+        val childPassword = childPin
 
         // Create parent account
         val authResult = auth.createUserWithEmailAndPassword(email, password).await()
         val parentId = authResult.user?.uid ?: throw Exception("Failed to create parent account")
 
-        // Create child account (anonymous)
-        val childAuth = auth.signInAnonymously().await()
+        // Sign out parent temporarily to create child account
+        auth.signOut()
+
+        // Create child account with email/password (required for child login)
+        val childAuth = auth.createUserWithEmailAndPassword(childEmail, childPassword).await()
         val childId = childAuth.user?.uid ?: throw Exception("Failed to create child account")
 
         // Save parent data
@@ -62,12 +71,14 @@ private suspend fun registerUser(
 
         firestore.collection("users").document(parentId).set(parentData).await()
 
-        // Save child data
+        // Save child data with email/password so child can log in
         val childData = hashMapOf(
             "userId" to childId,
             "name" to childName,
             "age" to childAge.toInt(),
             "pinCode" to childPin,
+            "childEmail" to childEmail,
+            "childPassword" to childPassword,
             "userType" to "CHILD",
             "parentId" to parentId,
             "createdAt" to System.currentTimeMillis()
@@ -92,7 +103,7 @@ private suspend fun registerUser(
         auth.signOut()
         auth.signInWithEmailAndPassword(email, password).await()
 
-        onSuccess()
+        onSuccess(childPin)
     } catch (e: Exception) {
         onError(e.message ?: "Registration failed")
     }
@@ -110,16 +121,17 @@ fun ParentRegistrationScreen(
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var confirmPassword by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+    var confirmPasswordVisible by remember { mutableStateOf(false) }
 
     // Child form fields
     var childName by remember { mutableStateOf("") }
     var childAge by remember { mutableStateOf("") }
-    var childPin by remember { mutableStateOf("") }
-    var confirmChildPin by remember { mutableStateOf("") }
 
     // UI states
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var generatedPin by remember { mutableStateOf<String?>(null) }
     var showChildForm by remember { mutableStateOf(true) }
 
     val auth = FirebaseAuth.getInstance()
@@ -161,18 +173,6 @@ fun ParentRegistrationScreen(
             }
             childAge.toIntOrNull() == null || childAge.toInt() !in 4..17 -> {
                 errorMessage = "Child age must be between 4 and 17"
-                return false
-            }
-            childPin.isBlank() -> {
-                errorMessage = "Please create a PIN for your child (4-6 digits)"
-                return false
-            }
-            childPin.length < 4 -> {
-                errorMessage = "PIN must be at least 4 digits"
-                return false
-            }
-            childPin != confirmChildPin -> {
-                errorMessage = "PINs do not match"
                 return false
             }
         }
@@ -256,8 +256,16 @@ fun ParentRegistrationScreen(
                     value = password,
                     onValueChange = { password = it },
                     label = { Text("Password") },
-                    visualTransformation = PasswordVisualTransformation(),
+                    visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                            Icon(
+                                imageVector = if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (passwordVisible) "Hide password" else "Show password"
+                            )
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
                     singleLine = true
@@ -269,8 +277,16 @@ fun ParentRegistrationScreen(
                     value = confirmPassword,
                     onValueChange = { confirmPassword = it },
                     label = { Text("Confirm Password") },
-                    visualTransformation = PasswordVisualTransformation(),
+                    visualTransformation = if (confirmPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        IconButton(onClick = { confirmPasswordVisible = !confirmPasswordVisible }) {
+                            Icon(
+                                imageVector = if (confirmPasswordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (confirmPasswordVisible) "Hide password" else "Show password"
+                            )
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
                     singleLine = true
@@ -317,31 +333,12 @@ fun ParentRegistrationScreen(
                     singleLine = true
                 )
 
-                Spacer(modifier = Modifier.height(8.dp))
 
-                OutlinedTextField(
-                    value = childPin,
-                    onValueChange = { childPin = it.take(6) },
-                    label = { Text("Child's PIN (4-6 digits)") },
-                    placeholder = { Text("e.g., 1234") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    singleLine = true
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                OutlinedTextField(
-                    value = confirmChildPin,
-                    onValueChange = { confirmChildPin = it.take(6) },
-                    label = { Text("Confirm Child's PIN") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    singleLine = true
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "A unique PIN will be generated automatically after registration.",
+                    fontSize = 12.sp,
+                    color = Color(0xFF6B7280)
                 )
             }
         }
@@ -379,6 +376,37 @@ fun ParentRegistrationScreen(
             )
         }
 
+        generatedPin?.let { pin ->
+            AlertDialog(
+                onDismissRequest = {},
+                title = { Text("Account Created!") },
+                text = {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Share this PIN with ${childName} so they can log in:")
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = pin,
+                            fontSize = 36.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 8.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "You can view this PIN anytime from your dashboard.",
+                            fontSize = 12.sp,
+                            color = Color(0xFF6B7280)
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = { generatedPin = null; onRegistrationSuccess() }) {
+                        Text("Done")
+                    }
+                }
+            )
+        }
+
         // Register Button
         Button(
             onClick = {
@@ -392,11 +420,15 @@ fun ParentRegistrationScreen(
                             fullName = fullName,
                             childName = childName,
                             childAge = childAge,
-                            childPin = childPin,
-                            onSuccess = { onRegistrationSuccess() },
-                            onError = { errorMessage = it }
+                            onSuccess = { pin ->
+                                generatedPin = pin
+                                isLoading = false
+                            },
+                            onError = {
+                                errorMessage = it
+                                isLoading = false
+                            }
                         )
-                        isLoading = false
                     }
                 }
             },

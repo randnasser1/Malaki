@@ -2,11 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- ========== EXISTING PERMISSIONS ========== -->
-    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
-        tools:ignore="ProtectedPermissions" />
+    <!-- ========== PARENT PERMISSIONS ========== -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- ========== CHILD-ONLY PERMISSIONS ========== -->
+    <!-- These are only requested when logged in as a child -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.READ_NOTIFICATIONS" />
 
     <!-- ========== ADD THESE FOR FIREBASE ========== -->
@@ -21,6 +24,18 @@
         android:protectionLevel="signature" />
     <uses-permission android:name="${applicationId}.permission.C2D_MESSAGE" />
 
+    <queries>
+        <package android:name="com.instagram.android" />
+        <package android:name="com.whatsapp" />
+        <package android:name="com.facebook.orca" />
+        <package android:name="com.discord" />
+        <package android:name="com.twitter.android" />
+        <package android:name="com.snapchat.android" />
+        <package android:name="com.spotify.music" />
+        <package android:name="com.google.android.youtube" />
+        <package android:name="com.android.chrome" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -29,8 +44,8 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Malaki"
         android:requestLegacyExternalStorage="true"
+        android:usesCleartextTraffic="true"
         tools:targetApi="31">
-
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -41,13 +56,13 @@
             </intent-filter>
         </activity>
 
-        <!-- Background Service -->
+        <!-- Background Service (CHILD ONLY) -->
         <service
             android:name=".BackgroundService"
             android:enabled="true"
             android:exported="false" />
 
-        <!-- Music Notification Service -->
+        <!-- Music Notification Service (CHILD ONLY) -->
         <service
             android:name=".MusicDataService"
             android:label="Music Data Service"
@@ -58,7 +73,7 @@
             </intent-filter>
         </service>
 
-        <!-- Message Accessibility Service -->
+        <!-- Message Accessibility Service (CHILD ONLY) -->
         <service
             android:name=".MessageAccessibilityService"
             android:label="Message Collector"

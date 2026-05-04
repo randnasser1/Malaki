@@ -25,7 +25,7 @@ fun QRCodeScreen(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "Connect Your Child",
+            text = "Connection Code",
             fontSize = 24.sp,
             fontWeight = FontWeight.Bold
         )
@@ -37,7 +37,7 @@ fun QRCodeScreen(
             color = Color.Gray
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(24.dp))
 
         // Display connection code
         Card(
@@ -56,21 +56,6 @@ fun QRCodeScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(32.dp),
-                textAlign = TextAlign.Center
-            )
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // QR Code placeholder
-        Box(
-            modifier = Modifier
-                .size(200.dp)
-                .background(Color.LightGray),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "QR Code\n($connectionCode)",
                 textAlign = TextAlign.Center
             )
         }

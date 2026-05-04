@@ -8,10 +8,18 @@ import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import com.example.malaki.db.EventRepository
 import com.example.malaki.security.ContentSafetyManager
 import kotlinx.coroutines.runBlocking
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 
 class DataCollector(private val context: Context) {
+
+    private val repository = EventRepository(context)
 
     companion object {
         private const val TAG = "DataCollector"
@@ -20,107 +28,36 @@ class DataCollector(private val context: Context) {
         private const val MUSIC_FILE = "music_data.json"
     }
 
-    // Save Music Notification Data - Consolidate all music files
     fun saveMusicNotificationData() {
-        Log.d(TAG, "🎵 Consolidating music data...")
+        Log.d(TAG, "🎵 Checking music data...")
 
         Thread {
             try {
-                // 1. First, find all music notification files
-                val filesDir = context.filesDir
-                val allFiles = filesDir.listFiles() ?: emptyArray()
-
-                val musicNotificationFiles = allFiles.filter {
-                    it.name.startsWith("music_notifications_") && it.name.endsWith(".json")
+                val musicFile = File(context.filesDir, MUSIC_FILE)
+                if (!musicFile.exists() || musicFile.length() == 0L) {
+                    Log.d(TAG, "📭 No music data found")
+                    return@Thread
                 }
 
-                Log.d(TAG, "Found ${musicNotificationFiles.size} music notification files")
-
-                // 2. Read existing consolidated music data
-                val consolidatedFile = File(filesDir, MUSIC_FILE)
-                val consolidatedArray = if (consolidatedFile.exists() && consolidatedFile.length() > 0) {
-                    try {
-                        JSONArray(consolidatedFile.readText())
-                    } catch (e: Exception) {
-                        JSONArray()
-                    }
-                } else {
+                // Read existing music data
+                val musicArray = try {
+                    JSONArray(musicFile.readText())
+                } catch (e: Exception) {
                     JSONArray()
                 }
 
-                val seenTracks = mutableSetOf<String>()
-
-                // 3. Add existing consolidated entries to seen set
-                for (i in 0 until consolidatedArray.length()) {
-                    try {
-                        val entry = consolidatedArray.getJSONObject(i)
-                        val trackInfo = entry.getJSONObject("track_info")
-                        val key = "${trackInfo.getString("artist")}|${trackInfo.getString("track")}|${entry.getLong("timestamp")}"
-                        seenTracks.add(key)
-                    } catch (e: Exception) {
-                        continue
-                    }
+                if (musicArray.length() == 0) {
+                    Log.d(TAG, "📭 No music entries")
+                    return@Thread
                 }
 
-                // 4. Process each notification file and add to consolidated data
-                var addedCount = 0
-                musicNotificationFiles.forEach { file ->
-                    try {
-                        val content = file.readText()
-                        val notification = JSONObject(content)
+                Log.d(TAG, "Found ${musicArray.length()} music entries")
 
-                        // Convert old format to new format
-                        val musicEvent = convertOldToNewFormat(notification)
-
-                        // Check for duplicates
-                        val trackInfo = musicEvent.getJSONObject("track_info")
-                        val key = "${trackInfo.getString("artist")}|${trackInfo.getString("track")}|${musicEvent.getLong("timestamp")}"
-
-                        if (!seenTracks.contains(key)) {
-                            consolidatedArray.put(musicEvent)
-                            seenTracks.add(key)
-                            addedCount++
-
-                            // Delete the old file after processing
-                            file.delete()
-                            Log.d(TAG, "✅ Processed and deleted: ${file.name}")
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "❌ Error processing ${file.name}: ${e.message}")
-                    }
-                }
-
-                // 5. Save consolidated data
-                if (addedCount > 0 || !consolidatedFile.exists()) {
-                    // Keep only last 1000 entries
-                    val finalArray = if (consolidatedArray.length() > 1000) {
-                        JSONArray().apply {
-                            for (i in consolidatedArray.length() - 1000 until consolidatedArray.length()) {
-                                put(consolidatedArray.getJSONObject(i))
-                            }
-                        }
-                    } else {
-                        consolidatedArray
-                    }
-
-                    consolidatedFile.writeText(finalArray.toString(2))
-                    Log.d(TAG, "✅ Consolidated music data saved: ${finalArray.length()} entries total")
-                } else {
-                    Log.d(TAG, "📭 No new music data to consolidate")
-                }
-
-                // 6. Also clean up any other music_*.json files
-                allFiles.filter {
-                    it.name.startsWith("music_") &&
-                            it.name != MUSIC_FILE &&
-                            it.name.endsWith(".json")
-                }.forEach { file ->
-                    file.delete()
-                    Log.d(TAG, "🗑️ Deleted duplicate file: ${file.name}")
-                }
+                // Write directly to Firestore
+                saveMusicDataToFirestore(musicArray)
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error consolidating music data: ${e.message}")
+                Log.e(TAG, "❌ Error processing music data: ${e.message}")
             }
         }.start()
     }
@@ -154,7 +91,31 @@ class DataCollector(private val context: Context) {
             put("is_playing", oldNotification.optBoolean("is_playing", false))
         }
     }
+    // Add this function to DataCollector class
+    fun saveWellbeingResponse(score: Int, answers: String) {
+        GlobalScope.launch {
+            try {
+                val auth = FirebaseAuth.getInstance()
+                val currentUser = auth.currentUser ?: return@launch
+                val firestore = FirebaseFirestore.getInstance()
+                val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
 
+                val data = hashMapOf(
+                    "childId" to currentUser.uid,
+                    "date" to today,
+                    "timestamp" to System.currentTimeMillis(),
+                    "score" to score,
+                    "answers" to answers
+                )
+
+                // Just add a new document each time
+                firestore.collection("wellbeing_daily_summary").add(data).await()
+                Log.d(TAG, "✅ Wellbeing saved: score=$score")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save wellbeing: ${e.message}")
+            }
+        }
+    }
     // Save App Usage Data
     fun saveAppUsageData() {
         Log.d(TAG, "📱 Saving app usage data...")
@@ -212,6 +173,10 @@ class DataCollector(private val context: Context) {
                 }
 
                 appendToFileWithDedup(APP_USAGE_FILE, todayEntry, "date")
+                
+                // Write to Firestore
+                saveAppUsageToFirestore(todayEntry)
+                
                 Log.d(TAG, "✅ App usage saved")
 
             } catch (e: Exception) {
@@ -220,10 +185,105 @@ class DataCollector(private val context: Context) {
         }.start()
     }
 
+    private fun saveAppUsageToFirestore(todayEntry: JSONObject) {
+        GlobalScope.launch {
+            try {
+                val auth = FirebaseAuth.getInstance()
+                val currentUser = auth.currentUser ?: return@launch
+
+                val firestore = FirebaseFirestore.getInstance()
+                
+                val appUsageData = mapOf(
+                    "childId" to currentUser.uid,
+                    "date" to todayEntry.getString("date"),
+                    "timestamp" to todayEntry.getLong("timestamp"),
+                    "totalTimeMin" to todayEntry.getLong("total_time_min"),
+                    "appCount" to todayEntry.getInt("app_count"),
+                    "apps" to parseJsonArrayToList(todayEntry.getJSONArray("apps"))
+                )
+                
+                // Use childId_date as doc ID so multiple children don't overwrite each other
+                val docId = "${currentUser.uid}_${todayEntry.getString("date")}"
+                firestore.collection("app_usage")
+                    .document(docId)
+                    .set(appUsageData)
+                    .await()
+
+                // Mirror to Room for backend ML analysis
+                repository.ensureDeviceProfile()
+                repository.captureEvent(
+                    eventType = "APP_USAGE",
+                    rawText = todayEntry.toString(),
+                    textPreview = "AppUsage ${todayEntry.getString("date")}: ${todayEntry.getLong("total_time_min")} min",
+                    timestampUtc = todayEntry.getLong("timestamp")
+                )
+
+                Log.d(TAG, "✅ App usage written to Firestore")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error writing app usage to Firestore: ${e.message}")
+            }
+        }
+    }
+
+    private fun saveMusicDataToFirestore(musicArray: JSONArray) {
+        GlobalScope.launch {
+            try {
+                val auth = FirebaseAuth.getInstance()
+                val currentUser = auth.currentUser ?: return@launch
+
+                val firestore = FirebaseFirestore.getInstance()
+
+                // Parse music array to list of maps - FIXED: Properly convert JSONObject
+                val musicList = mutableListOf<Map<String, Any>>()
+                for (i in 0 until musicArray.length()) {
+                    val obj = musicArray.getJSONObject(i)
+                    val map = mutableMapOf<String, Any>()
+                    obj.keys().forEach { key ->
+                        val value = obj.get(key)
+                        when (value) {
+                            is JSONObject -> {
+                                // Convert nested JSONObject to Map
+                                val nestedMap = mutableMapOf<String, Any>()
+                                value.keys().forEach { nestedKey ->
+                                    nestedMap[nestedKey] = value.get(nestedKey)
+                                }
+                                map[key] = nestedMap
+                            }
+                            is JSONArray -> {
+                                // Convert JSONArray to List
+                                val list = mutableListOf<Any>()
+                                for (j in 0 until value.length()) {
+                                    list.add(value.get(j))
+                                }
+                                map[key] = list
+                            }
+                            else -> map[key] = value
+                        }
+                    }
+                    musicList.add(map)
+                }
+
+                val musicData = mapOf(
+                    "childId" to currentUser.uid,
+                    "timestamp" to System.currentTimeMillis(),
+                    "entries" to musicList
+                )
+
+                firestore.collection("music_tracking")
+                    .add(musicData)
+                    .await()
+
+                Log.d(TAG, "✅ Music data written to Firestore with ${musicList.size} entries")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error writing music data to Firestore: ${e.message}")
+                e.printStackTrace()
+            }
+        }
+    }
+
     // Save Messages
     fun saveMessages() {
         Log.d(TAG, "💬 Saving messages...")
-        // Keep your existing implementation
         Thread {
             try {
                 val messagesFile = File(context.filesDir, "messages.txt")
@@ -232,14 +292,14 @@ class DataCollector(private val context: Context) {
                     return@Thread
                 }
 
-                val messages = messagesFile.readLines()
+                val messages = messagesFile.readLines().filter { it.isNotBlank() }
                 if (messages.isEmpty()) return@Thread
 
+                val now = System.currentTimeMillis()
                 val entry = JSONObject().apply {
-                    put("timestamp", System.currentTimeMillis())
+                    put("timestamp", now)
                     put("date", SimpleDateFormat("yyyy-MM-dd").format(Date()))
                     put("message_count", messages.size)
-
                     val messagesArray = JSONArray()
                     messages.takeLast(50).forEach { messagesArray.put(it) }
                     put("messages", messagesArray)
@@ -251,7 +311,6 @@ class DataCollector(private val context: Context) {
                 } else {
                     JSONArray()
                 }
-
                 existingArray.put(entry)
 
                 if (existingArray.length() > 100) {
@@ -264,7 +323,20 @@ class DataCollector(private val context: Context) {
                     file.writeText(existingArray.toString(2))
                 }
 
-                Log.d(TAG, "✅ Messages saved")
+                // Write each message to Room so the backend ML pipeline processes them
+                runBlocking {
+                    repository.ensureDeviceProfile()
+                    messages.takeLast(50).forEach { msg ->
+                        repository.captureEvent(
+                            eventType = "MESSAGE",
+                            rawText = msg,
+                            textPreview = msg.take(100),
+                            timestampUtc = now
+                        )
+                    }
+                }
+
+                Log.d(TAG, "✅ Messages saved (${messages.size} written to Room for ML)")
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error saving messages: ${e.message}")
@@ -405,6 +477,48 @@ class DataCollector(private val context: Context) {
         } else {
             alertsFile.writeText(existingArray.toString(2))
         }
+        
+        // Write to Firestore
+        saveRiskAlertToFirestore(url, result)
+    }
+
+    private fun saveRiskAlertToFirestore(url: String, result: ContentSafetyManager.SafetyResult) {
+        GlobalScope.launch {
+            try {
+                val auth = FirebaseAuth.getInstance()
+                val currentUser = auth.currentUser ?: return@launch
+
+                val firestore = FirebaseFirestore.getInstance()
+
+                // Store ONLY risk assessment data, NO URL or message content
+                val assessmentData = mapOf(
+                    "childId" to currentUser.uid,
+                    "timestamp" to System.currentTimeMillis(),
+                    "riskLevel" to result.riskLevel.name,
+                    "confidenceScore" to result.confidenceScore,
+                    "isAlertTriggered" to true,
+                    "sourceType" to "URL"  // Just the type, not the actual URL
+                    // ⚠️ NO "url" field - that stays local only
+                )
+
+                firestore.collection("risk_assessment")  // Note: renamed from risk_reports
+                    .add(assessmentData)
+                    .await()
+
+                // URL stays LOCAL only (encrypted in Room, never sent to cloud)
+                repository.ensureDeviceProfile()
+                repository.captureEvent(
+                    eventType = "URL",
+                    rawText = url,  // Stays encrypted in local Room database
+                    textPreview = url.take(100),
+                    timestampUtc = System.currentTimeMillis()
+                )
+
+                Log.d(TAG, "✅ Risk assessment stored in Firestore (URL kept private locally)")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error writing risk assessment to Firestore: ${e.message}")
+            }
+        }
     }
 
     private fun saveUrlAnalysis(url: String, result: ContentSafetyManager.SafetyResult) {
@@ -454,7 +568,157 @@ class DataCollector(private val context: Context) {
             }
             .distinct()
     }
+    // Add this function for incremental app usage (last 5 minutes)
+    fun saveAppUsageDataIncremental() {
+        Thread {
+            try {
+                val usageManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
+                    ?: return@Thread
 
+                // Get LAST 5 MINUTES only
+                val calendar = Calendar.getInstance()
+                val endTime = calendar.timeInMillis
+                calendar.add(Calendar.MINUTE, -5)
+                val startTime = calendar.timeInMillis
+
+                val statsList = usageManager.queryUsageStats(
+                    UsageStatsManager.INTERVAL_DAILY,
+                    startTime,
+                    endTime
+                ) ?: return@Thread
+
+                if (statsList.isEmpty()) return@Thread
+
+                val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+                val today = dateFormat.format(Date())
+
+                val usageArray = JSONArray()
+                var totalTime = 0L
+
+                statsList.forEach { appStats ->
+                    val timeUsed = appStats.totalTimeInForeground
+                    if (timeUsed > 1000) {  // More than 1 second
+                        totalTime += timeUsed
+
+                        val appUsage = JSONObject().apply {
+                            put("package", appStats.packageName)
+                            put("time_ms", timeUsed)
+                            put("time_min", timeUsed / 60000)
+                            put("last_used", appStats.lastTimeUsed)
+
+                            try {
+                                val appInfo = context.packageManager.getApplicationInfo(appStats.packageName, 0)
+                                put("app_name", context.packageManager.getApplicationLabel(appInfo).toString())
+                            } catch (e: Exception) {
+                                put("app_name", appStats.packageName)
+                            }
+                        }
+                        usageArray.put(appUsage)
+                    }
+                }
+
+                if (usageArray.length() == 0) return@Thread
+
+                // Update cumulative usage for today
+                updateOrCreateTodayUsage(today, totalTime, usageArray)
+
+                Log.d(TAG, "✅ Incremental app usage saved (last 5 min)")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error saving incremental app usage: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun updateOrCreateTodayUsage(date: String, additionalTimeMs: Long, newApps: JSONArray) {
+        GlobalScope.launch {
+            try {
+                val auth = FirebaseAuth.getInstance()
+                val currentUser = auth.currentUser ?: return@launch
+
+                val firestore = FirebaseFirestore.getInstance()
+                val docId = "${currentUser.uid}_$date"
+                val docRef = firestore.collection("app_usage").document(docId)
+
+                val existingDoc = docRef.get().await()
+
+                if (existingDoc.exists()) {
+                    // Update existing document
+                    val existingTotal = existingDoc.getLong("totalTimeMin") ?: 0L
+                    val newTotalMin = (existingTotal + (additionalTimeMs / 60000))
+
+                    @Suppress("UNCHECKED_CAST")
+                    val existingApps = existingDoc.get("apps") as? List<Map<String, Any>> ?: emptyList()
+                    val mergedApps = mergeAppLists(existingApps, newApps)
+
+                    docRef.update(
+                        mapOf(
+                            "totalTimeMin" to newTotalMin,
+                            "apps" to mergedApps,
+                            "lastUpdated" to System.currentTimeMillis()
+                        )
+                    ).await()
+                } else {
+                    // Create new document
+                    val appUsageData = mapOf(
+                        "childId" to currentUser.uid,
+                        "date" to date,
+                        "timestamp" to System.currentTimeMillis(),
+                        "totalTimeMin" to (additionalTimeMs / 60000),
+                        "appCount" to newApps.length(),
+                        "apps" to parseJsonArrayToList(newApps)
+                    )
+                    docRef.set(appUsageData).await()
+                }
+
+                // Also store in Room for ML pipeline
+                repository.ensureDeviceProfile()
+                repository.captureEvent(
+                    eventType = "APP_USAGE",
+                    rawText = "Incremental update for $date",
+                    textPreview = "App usage updated",
+                    timestampUtc = System.currentTimeMillis()
+                )
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error updating app usage: ${e.message}")
+            }
+        }
+    }
+
+    private fun mergeAppLists(existingApps: List<Map<String, Any>>, newApps: JSONArray): List<Map<String, Any>> {
+        val merged = mutableMapOf<String, MutableMap<String, Any>>()
+
+        // Add existing apps
+        existingApps.forEach { app ->
+            val name = app["app_name"] as? String ?: return@forEach
+            merged[name] = app.toMutableMap()
+        }
+
+        // Add/update with new apps
+        for (i in 0 until newApps.length()) {
+            val newApp = newApps.getJSONObject(i)
+            val name = newApp.getString("app_name")
+            val additionalTime = newApp.getLong("time_min")
+
+            if (merged.containsKey(name)) {
+                val existing = merged[name]!!
+                val existingTime = (existing["time_min"] as? Long) ?: 0L
+                existing["time_min"] = existingTime + additionalTime
+                existing["time_ms"] = (existingTime + additionalTime) * 60000
+            } else {
+                merged[name] = mapOf(
+                    "app_name" to name,
+                    "package" to newApp.getString("package"),
+                    "time_min" to additionalTime,
+                    "time_ms" to additionalTime * 60000,
+                    "last_used" to newApp.getLong("last_used")
+                ).toMutableMap()
+            }
+        }
+
+        return merged.values.toList()
+    }
     fun getRecentBrowserHistory(limit: Int = 20): List<BrowserHistoryEntry> {
         val browserFile = File(context.filesDir, "browser_history.txt")
         if (!browserFile.exists()) return emptyList()
@@ -506,3 +770,17 @@ data class BrowserHistoryEntry(
     val packageName: String,
     val url: String
 )
+
+// Helper function to parse JSONArray to List<Map>
+private fun parseJsonArrayToList(array: JSONArray): List<Map<String, Any>> {
+    val list = mutableListOf<Map<String, Any>>()
+    for (i in 0 until array.length()) {
+        val obj = array.getJSONObject(i)
+        val map = mutableMapOf<String, Any>()
+        obj.keys().forEach { key ->
+            map[key] = obj.get(key) as Any
+        }
+        list.add(map)
+    }
+    return list
+}

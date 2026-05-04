@@ -1,6 +1,7 @@
 package com.example.malaki
 
 import android.app.AppOpsManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -9,7 +10,6 @@ import android.provider.Settings
 
 class PermissionHelper(private val context: Context) {
 
-    // Check if usage stats permission is granted
     fun checkUsageStatsPermission(): Boolean {
         return try {
             val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
@@ -24,42 +24,74 @@ class PermissionHelper(private val context: Context) {
         }
     }
 
-    // Check if notification access is granted
     fun checkNotificationAccess(): Boolean {
-        // Check if our NotificationListenerService is enabled
         val enabledListeners = Settings.Secure.getString(
             context.contentResolver,
             "enabled_notification_listeners"
         )
-        val packageName = context.packageName
-        return enabledListeners?.contains(packageName) == true
+        return enabledListeners?.contains(context.packageName) == true
     }
 
-    // Request usage stats permission
+    fun checkAccessibilityService(): Boolean {
+        val enabled = try {
+            Settings.Secure.getInt(context.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED)
+        } catch (e: Exception) { 0 }
+        if (enabled == 0) return false
+        val services = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        // Android stores the full class name: "com.example.malaki/com.example.malaki.MessageAccessibilityService"
+        val component = ComponentName(context, MessageAccessibilityService::class.java)
+        return services.contains(component.flattenToString(), ignoreCase = true)
+    }
+
     fun requestUsageStatsPermission() {
         val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(intent)
     }
 
-    // Open notification access settings
     fun openNotificationAccessSettings() {
-        val intent = Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-
-        // For Android 11+
+        // API 30+: jump directly to the toggle for this specific service
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            intent.data = Uri.parse("package:${context.packageName}")
+            try {
+                val component = ComponentName(context.packageName, "${context.packageName}.MusicDataService")
+                val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+                    .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, component.flattenToString())
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                return
+            } catch (e: Exception) {
+                // fall through to generic page
+            }
         }
+        // Fallback: generic notification listener list
+        try {
+            context.startActivity(
+                Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (e: Exception) {
+            context.startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.parse("package:${context.packageName}"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }
+    }
 
+    fun openAccessibilitySettings() {
+        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
             context.startActivity(intent)
         } catch (e: Exception) {
-            // Fallback to app settings
-            val fallbackIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-            fallbackIntent.data = Uri.parse("package:${context.packageName}")
-            fallbackIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(fallbackIntent)
+            context.startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.parse("package:${context.packageName}"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
         }
     }
 }

@@ -60,7 +60,7 @@ class RiskEngine(private val context: Context) {
                     ) }
                 )
 
-                firestore.collection("risk_reports")
+                firestore.collection("risk_assessment")
                     .add(report)
                     .await()
 

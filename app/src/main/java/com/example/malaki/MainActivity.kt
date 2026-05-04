@@ -41,7 +41,6 @@ class MainActivity : AppCompatActivity() {
 
         // Initialize Firebase
         initializeFirebase()
-        testFirestoreWrite()
         // Start background services if permissions are granted
         startBackgroundServicesIfPermitted()
 // Add this after initializeFirebase()
@@ -49,29 +48,14 @@ class MainActivity : AppCompatActivity() {
         firebaseAppCheck.installAppCheckProviderFactory(
             DebugAppCheckProviderFactory.getInstance()
         )
+        FirebaseAuth.getInstance().useEmulator("10.0.2.2", 9099) // For emulator
+
         // Set up the Compose UI with Authentication Flow
         setContent {
             MalakiTheme {
                 AppAuthFlow(authManager = authManager)
             }
         }
-    }
-    // Add this function to test Firestore
-    private fun testFirestoreWrite() {
-        val firestore = FirebaseFirestore.getInstance()
-        val testData = hashMapOf(
-            "test" to "connection",
-            "timestamp" to System.currentTimeMillis()
-        )
-
-        firestore.collection("test_write")
-            .add(testData)
-            .addOnSuccessListener {
-                android.util.Log.d("FIREBASE_TEST", "✅ Firestore test WRITE successful!")
-            }
-            .addOnFailureListener { e ->
-                android.util.Log.e("FIREBASE_TEST", "❌ Firestore test WRITE failed: ${e.message}", e)
-            }
     }
     private fun initializeFirebase() {
         try {
@@ -86,19 +70,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startBackgroundServicesIfPermitted() {
-        // Check if permissions are granted, then start background services
+        if (authManager.currentUserType != com.example.malaki.auth.UserType.CHILD) return
+
         if (permissionHelper.checkUsageStatsPermission()) {
             val serviceIntent = Intent(this, BackgroundService::class.java)
             startService(serviceIntent)
         }
 
-        // Start collecting data periodically
         handler.postDelayed({
             collectDataIfPermitted()
         }, 5000)
     }
 
     private fun collectDataIfPermitted() {
+        if (authManager.currentUserType != com.example.malaki.auth.UserType.CHILD) return
+
         if (permissionHelper.checkUsageStatsPermission()) {
             Thread {
                 try {
@@ -110,7 +96,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }.start()
         }
-        // Repeat every 5 minutes
         handler.postDelayed({
             collectDataIfPermitted()
         }, 300000)
@@ -127,8 +112,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkPermissionsSilently() {
+        if (authManager.currentUserType != com.example.malaki.auth.UserType.CHILD) return
+
         if (!permissionHelper.checkUsageStatsPermission()) {
-            // Show dialog to request permission
             AlertDialog.Builder(this)
                 .setTitle("Permission Required")
                 .setMessage("Malaki needs usage access to monitor app usage and keep your child safe.")

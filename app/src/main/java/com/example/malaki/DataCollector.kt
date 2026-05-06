@@ -280,53 +280,51 @@ class DataCollector(private val context: Context) {
                 val messages = messagesFile.readLines().filter { it.isNotBlank() }
                 if (messages.isEmpty()) return@Thread
 
-                val now = System.currentTimeMillis()
-                val entry = JSONObject().apply {
-                    put("timestamp", now)
-                    put("date", SimpleDateFormat("yyyy-MM-dd").format(Date()))
-                    put("message_count", messages.size)
-                    val messagesArray = JSONArray()
-                    messages.takeLast(50).forEach { messagesArray.put(it) }
-                    put("messages", messagesArray)
-                }
+                // Get already saved message hashes to avoid duplicates
+                val prefs = context.getSharedPreferences("msg_prefs", Context.MODE_PRIVATE)
+                val savedHashes = prefs.getStringSet("saved_message_hashes", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
 
-                val file = File(context.filesDir, MESSAGES_FILE)
-                val existingArray = if (file.exists() && file.length() > 0) {
-                    JSONArray(file.readText())
-                } else {
-                    JSONArray()
-                }
-                existingArray.put(entry)
+                val newMessages = mutableListOf<String>()
+                val newHashes = mutableSetOf<String>()
 
-                if (existingArray.length() > 100) {
-                    val trimmed = JSONArray()
-                    for (i in existingArray.length() - 100 until existingArray.length()) {
-                        trimmed.put(existingArray.getJSONObject(i))
+                messages.forEach { msg ->
+                    val hash = msg.hashCode().toString()
+                    if (!savedHashes.contains(hash)) {
+                        newMessages.add(msg)
+                        newHashes.add(hash)
                     }
-                    file.writeText(trimmed.toString(2))
-                } else {
-                    file.writeText(existingArray.toString(2))
                 }
 
-                // Write each message to Room and sync REAL-TIME
+                if (newMessages.isEmpty()) {
+                    Log.d(TAG, "📭 No new messages to save")
+                    // Still clear the file to avoid reprocessing
+                    messagesFile.writeText("")
+                    return@Thread
+                }
+
+                val now = System.currentTimeMillis()
+
+                // Save only new messages to Room
                 runBlocking {
                     repository.ensureDeviceProfile()
-                    messages.takeLast(50).forEach { msg ->
-                        val eventId = repository.captureEvent(
+                    newMessages.takeLast(50).forEach { msg ->
+                        repository.captureEvent(
                             eventType = "MESSAGE",
                             rawText = msg,
                             textPreview = msg.take(100),
                             timestampUtc = now
                         )
-                        // REAL-TIME: Sync immediately after each message
-                        BackendSyncManager(context).syncSingleEvent(eventId, msg)
                     }
                 }
 
-                // Clear processed messages to avoid re-processing
+                // Update saved hashes
+                savedHashes.addAll(newHashes)
+                prefs.edit().putStringSet("saved_message_hashes", savedHashes).apply()
+
+                // Clear the file after processing
                 messagesFile.writeText("")
 
-                Log.d(TAG, "✅ Messages sent to backend in real-time")
+                Log.d(TAG, "✅ Saved ${newMessages.size} new messages (${messages.size - newMessages.size} duplicates skipped)")
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error saving messages: ${e.message}")

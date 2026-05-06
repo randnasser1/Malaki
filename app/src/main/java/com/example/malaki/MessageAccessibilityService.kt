@@ -308,21 +308,20 @@ class MessageAccessibilityService : AccessibilityService() {
 
     private fun saveMessage(packageName: String, text: String) {
         try {
-            // Skip empty messages
             if (text.isBlank()) return
 
-            // Create unique identifier (package + text + length to handle similar messages)
+            // Create unique identifier
             val messageId = "$packageName|${text.length}|${text.hashCode()}"
 
-            // Check if we've already seen this message
+            // Check if already seen
             if (seenMessages.contains(messageId)) {
+                Log.d(TAG, "⏭️ Skipping duplicate message")
                 return
             }
 
-            // Add to seen messages
             seenMessages.add(messageId)
 
-            // Limit seen messages cache
+            // Limit cache size
             if (seenMessages.size > 500) {
                 val iterator = seenMessages.iterator()
                 repeat(250) { if (iterator.hasNext()) iterator.remove() }
@@ -335,26 +334,21 @@ class MessageAccessibilityService : AccessibilityService() {
             val file = File(filesDir, "messages.txt")
             file.appendText(logEntry)
 
-            Log.d(TAG, "💾 Saved: ${text.take(50)}")
-
-            // 🆕 ADD THIS - Save to Room database for backend sync
-            try {
+            // Save to Room for ML
+            runBlocking {
                 val repository = EventRepository(applicationContext)
-                kotlinx.coroutines.runBlocking {
-                    repository.ensureDeviceProfile()
-                    repository.captureEvent(
-                        eventType = "MESSAGE",
-                        sourceApp = packageName,
-                        senderRole = "OTHER",
-                        rawText = text,
-                        textPreview = text.take(100),
-                        timestampUtc = System.currentTimeMillis()
-                    )
-                }
-                Log.d(TAG, "✅ Also saved to Room for ML analysis")
-            } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to save to Room: ${e.message}")
+                repository.ensureDeviceProfile()
+                repository.captureEvent(
+                    eventType = "MESSAGE",
+                    sourceApp = packageName,
+                    senderRole = "OTHER",
+                    rawText = text,
+                    textPreview = text.take(100),
+                    timestampUtc = System.currentTimeMillis()
+                )
             }
+
+            Log.d(TAG, "💾 Saved message (${text.take(50)})")
 
         } catch (e: Exception) {
             Log.e(TAG, "Error saving message: ${e.message}")

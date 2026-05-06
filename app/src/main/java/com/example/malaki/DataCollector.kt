@@ -16,7 +16,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
-
+import com.example.malaki.db.BackendSyncManager
 class DataCollector(private val context: Context) {
 
     private val repository = EventRepository(context)
@@ -192,7 +192,7 @@ class DataCollector(private val context: Context) {
                 val currentUser = auth.currentUser ?: return@launch
 
                 val firestore = FirebaseFirestore.getInstance()
-                
+
                 val appUsageData = mapOf(
                     "childId" to currentUser.uid,
                     "date" to todayEntry.getString("date"),
@@ -201,22 +201,21 @@ class DataCollector(private val context: Context) {
                     "appCount" to todayEntry.getInt("app_count"),
                     "apps" to parseJsonArrayToList(todayEntry.getJSONArray("apps"))
                 )
-                
-                // Use childId_date as doc ID so multiple children don't overwrite each other
+
                 val docId = "${currentUser.uid}_${todayEntry.getString("date")}"
                 firestore.collection("app_usage")
                     .document(docId)
                     .set(appUsageData)
                     .await()
 
-                // Mirror to Room for backend ML analysis
-                repository.ensureDeviceProfile()
-                repository.captureEvent(
-                    eventType = "APP_USAGE",
-                    rawText = todayEntry.toString(),
-                    textPreview = "AppUsage ${todayEntry.getString("date")}: ${todayEntry.getLong("total_time_min")} min",
-                    timestampUtc = todayEntry.getLong("timestamp")
-                )
+                // ❌ REMOVE THIS - DON'T send APP_USAGE to backend ML
+                // repository.ensureDeviceProfile()
+                // repository.captureEvent(
+                //     eventType = "APP_USAGE",
+                //     rawText = todayEntry.toString(),
+                //     textPreview = "AppUsage ${todayEntry.getString("date")}: ${todayEntry.getLong("total_time_min")} min",
+                //     timestampUtc = todayEntry.getLong("timestamp")
+                // )
 
                 Log.d(TAG, "✅ App usage written to Firestore")
             } catch (e: Exception) {
@@ -231,51 +230,37 @@ class DataCollector(private val context: Context) {
                 val auth = FirebaseAuth.getInstance()
                 val currentUser = auth.currentUser ?: return@launch
 
-                val firestore = FirebaseFirestore.getInstance()
-
-                // Parse music array to list of maps - FIXED: Properly convert JSONObject
-                val musicList = mutableListOf<Map<String, Any>>()
+                // Process each track and send to backend for mood classification
                 for (i in 0 until musicArray.length()) {
-                    val obj = musicArray.getJSONObject(i)
-                    val map = mutableMapOf<String, Any>()
-                    obj.keys().forEach { key ->
-                        val value = obj.get(key)
-                        when (value) {
-                            is JSONObject -> {
-                                // Convert nested JSONObject to Map
-                                val nestedMap = mutableMapOf<String, Any>()
-                                value.keys().forEach { nestedKey ->
-                                    nestedMap[nestedKey] = value.get(nestedKey)
-                                }
-                                map[key] = nestedMap
-                            }
-                            is JSONArray -> {
-                                // Convert JSONArray to List
-                                val list = mutableListOf<Any>()
-                                for (j in 0 until value.length()) {
-                                    list.add(value.get(j))
-                                }
-                                map[key] = list
-                            }
-                            else -> map[key] = value
-                        }
+                    val track = musicArray.getJSONObject(i)
+                    val trackInfo = track.getJSONObject("track_info")
+                    val timestamp = track.getLong("timestamp")
+
+                    // Create music event data
+                    val musicEventData = JSONObject().apply {
+                        put("track_info", JSONObject().apply {
+                            put("artist", trackInfo.getString("artist"))
+                            put("track", trackInfo.getString("track"))
+                        })
+                        put("timestamp", timestamp)
                     }
-                    musicList.add(map)
+
+                    // Capture as event for backend ML (for mood analysis)
+                    val eventId = repository.captureEvent(
+                        eventType = "MUSIC",
+                        rawText = musicEventData.toString(),
+                        textPreview = "${trackInfo.getString("artist")} - ${trackInfo.getString("track")}",
+                        timestampUtc = timestamp
+                    )
+
+                    // REAL-TIME: Sync music for mood classification
+                    BackendSyncManager(context).syncSingleEvent(eventId, musicEventData.toString())
                 }
 
-                val musicData = mapOf(
-                    "childId" to currentUser.uid,
-                    "timestamp" to System.currentTimeMillis(),
-                    "entries" to musicList
-                )
+                Log.d(TAG, "✅ Music data sent to backend for mood analysis (${musicArray.length()} tracks)")
 
-                firestore.collection("music_tracking")
-                    .add(musicData)
-                    .await()
-
-                Log.d(TAG, "✅ Music data written to Firestore with ${musicList.size} entries")
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error writing music data to Firestore: ${e.message}")
+                Log.e(TAG, "❌ Error writing music data: ${e.message}")
                 e.printStackTrace()
             }
         }
@@ -323,20 +308,25 @@ class DataCollector(private val context: Context) {
                     file.writeText(existingArray.toString(2))
                 }
 
-                // Write each message to Room so the backend ML pipeline processes them
+                // Write each message to Room and sync REAL-TIME
                 runBlocking {
                     repository.ensureDeviceProfile()
                     messages.takeLast(50).forEach { msg ->
-                        repository.captureEvent(
+                        val eventId = repository.captureEvent(
                             eventType = "MESSAGE",
                             rawText = msg,
                             textPreview = msg.take(100),
                             timestampUtc = now
                         )
+                        // REAL-TIME: Sync immediately after each message
+                        BackendSyncManager(context).syncSingleEvent(eventId, msg)
                     }
                 }
 
-                Log.d(TAG, "✅ Messages saved (${messages.size} written to Room for ML)")
+                // Clear processed messages to avoid re-processing
+                messagesFile.writeText("")
+
+                Log.d(TAG, "✅ Messages sent to backend in real-time")
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error saving messages: ${e.message}")
@@ -633,59 +623,12 @@ class DataCollector(private val context: Context) {
     private fun updateOrCreateTodayUsage(date: String, additionalTimeMs: Long, newApps: JSONArray) {
         GlobalScope.launch {
             try {
-                val auth = FirebaseAuth.getInstance()
-                val currentUser = auth.currentUser ?: return@launch
-
-                val firestore = FirebaseFirestore.getInstance()
-                val docId = "${currentUser.uid}_$date"
-                val docRef = firestore.collection("app_usage").document(docId)
-
-                val existingDoc = docRef.get().await()
-
-                if (existingDoc.exists()) {
-                    // Update existing document
-                    val existingTotal = existingDoc.getLong("totalTimeMin") ?: 0L
-                    val newTotalMin = (existingTotal + (additionalTimeMs / 60000))
-
-                    @Suppress("UNCHECKED_CAST")
-                    val existingApps = existingDoc.get("apps") as? List<Map<String, Any>> ?: emptyList()
-                    val mergedApps = mergeAppLists(existingApps, newApps)
-
-                    docRef.update(
-                        mapOf(
-                            "totalTimeMin" to newTotalMin,
-                            "apps" to mergedApps,
-                            "lastUpdated" to System.currentTimeMillis()
-                        )
-                    ).await()
-                } else {
-                    // Create new document
-                    val appUsageData = mapOf(
-                        "childId" to currentUser.uid,
-                        "date" to date,
-                        "timestamp" to System.currentTimeMillis(),
-                        "totalTimeMin" to (additionalTimeMs / 60000),
-                        "appCount" to newApps.length(),
-                        "apps" to parseJsonArrayToList(newApps)
-                    )
-                    docRef.set(appUsageData).await()
-                }
-
-                // Also store in Room for ML pipeline
-                repository.ensureDeviceProfile()
-                repository.captureEvent(
-                    eventType = "APP_USAGE",
-                    rawText = "Incremental update for $date",
-                    textPreview = "App usage updated",
-                    timestampUtc = System.currentTimeMillis()
-                )
 
             } catch (e: Exception) {
                 Log.e(TAG, "Error updating app usage: ${e.message}")
             }
         }
     }
-
     private fun mergeAppLists(existingApps: List<Map<String, Any>>, newApps: JSONArray): List<Map<String, Any>> {
         val merged = mutableMapOf<String, MutableMap<String, Any>>()
 

@@ -10,7 +10,8 @@ import android.view.accessibility.AccessibilityNodeInfo
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
-
+import com.example.malaki.db.EventRepository
+import kotlinx.coroutines.runBlocking
 class MessageAccessibilityService : AccessibilityService() {
 
     companion object {
@@ -313,16 +314,15 @@ class MessageAccessibilityService : AccessibilityService() {
             // Create unique identifier (package + text + length to handle similar messages)
             val messageId = "$packageName|${text.length}|${text.hashCode()}"
 
-            // Check if we've already seen this message (don't log duplicate skipped to reduce log spam)
+            // Check if we've already seen this message
             if (seenMessages.contains(messageId)) {
-                // Silently skip - no log
                 return
             }
 
             // Add to seen messages
             seenMessages.add(messageId)
 
-            // Limit seen messages cache to prevent memory issues
+            // Limit seen messages cache
             if (seenMessages.size > 500) {
                 val iterator = seenMessages.iterator()
                 repeat(250) { if (iterator.hasNext()) iterator.remove() }
@@ -336,6 +336,25 @@ class MessageAccessibilityService : AccessibilityService() {
             file.appendText(logEntry)
 
             Log.d(TAG, "💾 Saved: ${text.take(50)}")
+
+            // 🆕 ADD THIS - Save to Room database for backend sync
+            try {
+                val repository = EventRepository(applicationContext)
+                kotlinx.coroutines.runBlocking {
+                    repository.ensureDeviceProfile()
+                    repository.captureEvent(
+                        eventType = "MESSAGE",
+                        sourceApp = packageName,
+                        senderRole = "OTHER",
+                        rawText = text,
+                        textPreview = text.take(100),
+                        timestampUtc = System.currentTimeMillis()
+                    )
+                }
+                Log.d(TAG, "✅ Also saved to Room for ML analysis")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Failed to save to Room: ${e.message}")
+            }
 
         } catch (e: Exception) {
             Log.e(TAG, "Error saving message: ${e.message}")

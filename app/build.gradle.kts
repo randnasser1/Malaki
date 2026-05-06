@@ -16,9 +16,10 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+        buildConfigField("String", "BACKEND_BASE_URL", "\"http://10.0.2.2:8000\"")
 
         manifestPlaceholders += mapOf(
-            "redirectSchemeName" to "ai-child-guardian",
+            "redirectSchemeName" to "malaki",
             "redirectHostName" to "callback"
         )
 
@@ -42,10 +43,12 @@ android {
     buildTypes {
         debug {
             buildConfigField("String", "RAPIDAPI_KEY", "\"${secrets["RAPIDAPI_KEY"] ?: ""}\"")
+            buildConfigField("String", "BACKEND_BASE_URL", "\"${secrets["BACKEND_URL"] ?: "http://10.0.2.2:8000"}\"")
         }
         release {
             isMinifyEnabled = false
             buildConfigField("String", "RAPIDAPI_KEY", "\"${secrets["RAPIDAPI_KEY"] ?: ""}\"")
+            buildConfigField("String", "BACKEND_BASE_URL", "\"${secrets["BACKEND_URL"] ?: "http://10.0.2.2:8000"}\"")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -112,6 +115,7 @@ dependencies {
 
     // Navigation
     implementation("androidx.navigation:navigation-compose:2.7.7")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // Kotlin
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")

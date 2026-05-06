@@ -16,12 +16,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import com.example.malaki.MessageCollector
 import com.example.malaki.db.EventRepository
 import com.example.malaki.ui.components.SuccessState
 import com.example.malaki.ui.components.angel.Angel
 import com.example.malaki.ui.components.angel.AngelVariant
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
+
 val moodOptions = listOf(
     Triple("great", "😊", Color(0xFFE8F5A8)),
     Triple("good", "👍", Color(0xFFF3D97F)),
@@ -38,6 +41,7 @@ fun ChildHome(
     var selectedMood by remember { mutableStateOf<String?>(null) }
     var showAngel by remember { mutableStateOf(true) }
     var showSuccess by remember { mutableStateOf(false) }
+    var showAccessibilityDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val authManager = remember { com.example.malaki.auth.AuthManager(context) }
     val childName = authManager.getChildName()
@@ -49,10 +53,20 @@ fun ChildHome(
         colors = listOf(Color(0xFFFFF8E7), Color.White)
     )
 
+    // Check accessibility service when screen loads
+    LaunchedEffect(Unit) {
+        val messageCollector = MessageCollector(context)
+        val isEnabled = messageCollector.isServiceEnabled()
+        android.util.Log.d("ACCESSIBILITY", "Message service enabled: $isEnabled")
+
+        if (!isEnabled) {
+            showAccessibilityDialog = true
+        }
+    }
+
     fun saveMoodToFirestore(date: String, mood: String) {
         val childId = authManager.currentUser?.uid ?: run {
-
-        android.util.Log.e("MOOD", "❌ No child ID — Firebase Auth session may be null")
+            android.util.Log.e("MOOD", "❌ No child ID — Firebase Auth session may be null")
             return
         }
         val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
@@ -115,11 +129,39 @@ fun ChildHome(
                 }
         }
 
-        // Hide success message after 2 seconds - FIXED: Use Handler instead of runOnUiThread
+        // Hide success message after 2 seconds
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             showSuccess = false
         }, 2000)
     }
+
+    // Accessibility Dialog
+    if (showAccessibilityDialog) {
+        AlertDialog(
+            onDismissRequest = { showAccessibilityDialog = false },
+            title = { Text("Enable Message Monitoring") },
+            text = {
+                Text("To keep your child safe, Malaki needs to monitor messages for harmful content.\n\nPlease enable accessibility service in settings.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showAccessibilityDialog = false
+                        val messageCollector = MessageCollector(context)
+                        messageCollector.openAccessibilitySettings()
+                    }
+                ) {
+                    Text("Open Settings")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAccessibilityDialog = false }) {
+                    Text("Later")
+                }
+            }
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()

@@ -23,7 +23,10 @@ import java.util.*  // This provides Date, Locale, UUID
 import org.json.JSONArray
 import org.json.JSONObject
 import androidx.compose.ui.platform.LocalContext
-
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import android.util.Log
+import com.example.malaki.BuildConfig
 
 // Data classes
 data class SentimentData(val day: String, val score: Int)
@@ -54,7 +57,9 @@ fun ParentDashboard(
     val context = LocalContext.current
     val auth = FirebaseAuth.getInstance()
     val currentParentId = auth.currentUser?.uid ?: ""
-
+    var tbatsConcernLevel by remember { mutableStateOf("LOW") }
+    var tbatsMusicInsight by remember { mutableStateOf("") }
+    var tbatsUsageInsight by remember { mutableStateOf("") }
     // Load children when parent ID changes (sign in/out)
     LaunchedEffect(currentParentId) {
         if (currentParentId.isNotEmpty()) {
@@ -82,6 +87,8 @@ fun ParentDashboard(
             android.util.Log.d("DASHBOARD", "Loading data for child: $childId")
             isLoadingDashboard = true
             isLoadingAlerts = true
+
+            // Load dashboard data
             loadDashboardDataFromFirebase(context, childId) { sentiment, wellbeing, safety, music, usage, apps ->
                 android.util.Log.d("DASHBOARD", "Data received - sentiment: ${sentiment.size}, wellbeing: ${wellbeing.size}")
                 sentimentData = sentiment
@@ -92,10 +99,21 @@ fun ParentDashboard(
                 topAppsList = apps
                 isLoadingDashboard = false
             }
+
+            // Load alerts
             loadAlertsFromFirebase(context, childId) { loadedAlerts ->
                 alerts = loadedAlerts
                 isLoadingAlerts = false
             }
+
+            // 🆕 LOAD TBATS ANALYSIS (Behavioral Change Detection)
+            loadTbatsAnalysis(childId) { result ->
+                android.util.Log.d("DASHBOARD", "TBATS result: ${result["concern_level"]}")
+                tbatsConcernLevel = result["concern_level"] as? String ?: "LOW"
+                tbatsMusicInsight = result["music_insight"] as? String ?: ""
+                tbatsUsageInsight = result["usage_insight"] as? String ?: ""
+            }
+
         } else {
             android.util.Log.d("DASHBOARD", "Skipping load - missing childId or parentId")
         }
@@ -356,6 +374,45 @@ fun ParentDashboard(
                     }
                 }
 
+                // Behavioral Pattern Analysis (TBATS)
+                item {
+                    val concernColor = when (tbatsConcernLevel) {
+                        "HIGH" -> Color(0xFFEF4444)
+                        "MEDIUM" -> Color(0xFFF59E0B)
+                        else -> Color(0xFF10B981)
+                    }
+                    DashboardCard(
+                        title = "Behavioral Pattern Analysis",
+                        subtitle = "AI-detected changes in digital behavior over 30 days",
+                        icon = "🧠",
+                        iconColor = concernColor
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = concernColor.copy(alpha = 0.15f)
+                            ) {
+                                Text(
+                                    text = "Concern Level: $tbatsConcernLevel",
+                                    color = concernColor,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+                            if (tbatsMusicInsight.isNotEmpty()) {
+                                Text(tbatsMusicInsight, color = Color(0xFF374151), fontSize = 13.sp)
+                            }
+                            if (tbatsUsageInsight.isNotEmpty()) {
+                                Text(tbatsUsageInsight, color = Color(0xFF374151), fontSize = 13.sp)
+                            }
+                            if (tbatsMusicInsight.isEmpty() && tbatsUsageInsight.isEmpty()) {
+                                Text("Collecting behavioral data...", color = Color(0xFF6B7280), fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
+
                 // Risk Alerts Card
                 item {
                     RiskAlertsCard(
@@ -520,7 +577,75 @@ fun RiskAlertsCard(
         }
     }
 }
+// Add this function to load TBATS analysis
+fun loadTbatsAnalysis(childId: String, onResult: (Map<String, Any>) -> Unit) {
+    GlobalScope.launch {
+        try {
+            val client = OkHttpClient.Builder()
+                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
 
+            val request = Request.Builder()
+                .url("${BuildConfig.BACKEND_BASE_URL}/analyze/tbats/$childId?days=30")
+                .get()
+                .build()
+
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                val json = JSONObject(response.body?.string() ?: "{}")
+
+                val musicAnalysis = json.optJSONObject("music_analysis") ?: JSONObject()
+                val usageAnalysis = json.optJSONObject("usage_analysis") ?: JSONObject()
+                val concernLevel = json.optString("concern_level", "LOW")
+
+                val musicInsight = when {
+                    musicAnalysis.has("concern_level") && musicAnalysis.getString("concern_level") == "HIGH" ->
+                        "🎵 Unusual music mood patterns detected"
+                    musicAnalysis.has("concern_level") && musicAnalysis.getString("concern_level") == "MEDIUM" ->
+                        "🎵 Slight changes in music preferences"
+                    musicAnalysis.has("current_score") ->
+                        "🎵 Current mood score: ${String.format("%.2f", musicAnalysis.optDouble("current_score"))}"
+                    else -> "🎵 Not enough music data yet"
+                }
+
+                val usageInsight = when {
+                    usageAnalysis.has("concern_level") && usageAnalysis.getString("concern_level") == "HIGH" ->
+                        "📱 Significant screen time changes detected"
+                    usageAnalysis.has("concern_level") && usageAnalysis.getString("concern_level") == "MEDIUM" ->
+                        "📱 Slight increase in screen time"
+                    usageAnalysis.has("current_score") ->
+                        "📱 Screen time score: ${String.format("%.2f", usageAnalysis.optDouble("current_score"))}"
+                    else -> "📱 Not enough app usage data yet"
+                }
+
+                // FIXED: Use proper mapOf with Pair syntax
+                val resultMap: Map<String, Any> = mapOf(
+                    Pair("concern_level", concernLevel),
+                    Pair("music_insight", musicInsight),
+                    Pair("usage_insight", usageInsight),
+                    Pair("anomaly_dates", musicAnalysis.optJSONArray("anomaly_dates")?.length() ?: 0),
+                    Pair("negative_drift_dates", musicAnalysis.optJSONArray("negative_drift_dates")?.length() ?: 0)
+                )
+                onResult(resultMap)
+            } else {
+                Log.e("TBATS", "Error: ${response.code}")
+                onResult(mapOf(
+                    Pair("concern_level", "LOW"),
+                    Pair("music_insight", "⚠️ Could not load behavioral analysis"),
+                    Pair("usage_insight", "")
+                ))
+            }
+        } catch (e: Exception) {
+            Log.e("TBATS", "Exception: ${e.message}")
+            onResult(mapOf(
+                Pair("concern_level", "LOW"),
+                Pair("music_insight", "⚠️ Behavioral analysis unavailable"),
+                Pair("usage_insight", "")
+            ))
+        }
+    }
+}
 @Composable
 fun RiskAlertRow(alert: RiskAlert) {
     val statusColor = when (alert.riskLevel) {
@@ -710,7 +835,7 @@ fun loadDashboardDataFromFirebase(
             // Everything below is EXACTLY as you had it
             val wellbeing = listOf(
                 WellbeingData("Emotional", sentiments.filter { it.score > 0 }.map { it.score }.average().toInt().coerceIn(0, 100)),
-                WellbeingData("Consistency", (moodDocs.size() * 15).coerceIn(0, 100)),
+                WellbeingData("Consistency", ((moodDocs.size().toFloat() / 7f) * 100).toInt().coerceIn(0, 100)),
                 WellbeingData("Screen Time", 75),
                 WellbeingData("Music Engagement", 50)
             )

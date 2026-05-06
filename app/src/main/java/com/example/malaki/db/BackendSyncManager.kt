@@ -2,6 +2,7 @@ package com.example.malaki.db
 
 import android.content.Context
 import android.util.Log
+import com.example.malaki.BuildConfig
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import okhttp3.MediaType.Companion.toMediaType
@@ -12,7 +13,7 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "BackendSyncManager"
 
-private const val BACKEND_BASE_URL = "http://10.0.2.2:8000"
+private val BACKEND_BASE_URL get() = BuildConfig.BACKEND_BASE_URL
 
 // ── Request / Response DTOs ───────────────────────────────────────────────────
 
@@ -126,4 +127,39 @@ class BackendSyncManager(context: Context) {
             false
         }
     }
+    suspend fun syncSingleEvent(eventId: String, text: String) {
+        try {
+            val payload = EventPayload(
+                eventId = eventId,
+                deviceId = repository.deviceId,
+                eventType = when {
+                    text.contains("\"track_info\"") -> "MUSIC"
+                    else -> "MESSAGE"
+                },
+                sourceApp = null,
+                senderRole = "OTHER",
+                timestampUtc = System.currentTimeMillis(),
+                text = text
+            )
+
+            val body = gson.toJson(EventBatchRequest(events = listOf(payload)))
+                .toRequestBody(json)
+
+            val request = Request.Builder()
+                .url("$BACKEND_BASE_URL/events/analyze")
+                .post(body)
+                .build()
+
+            http.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    Log.d(TAG, "✅ Real-time sync successful for $eventId")
+                } else {
+                    Log.w(TAG, "Real-time sync returned ${response.code}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Real-time sync failed: ${e.message}")
+        }
+    }
 }
+

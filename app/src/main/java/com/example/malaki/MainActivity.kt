@@ -48,8 +48,6 @@ class MainActivity : AppCompatActivity() {
         firebaseAppCheck.installAppCheckProviderFactory(
             DebugAppCheckProviderFactory.getInstance()
         )
-        FirebaseAuth.getInstance().useEmulator("10.0.2.2", 9099) // For emulator
-
         // Set up the Compose UI with Authentication Flow
         setContent {
             MalakiTheme {

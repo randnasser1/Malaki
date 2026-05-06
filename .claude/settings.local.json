@@ -3,7 +3,8 @@
     "allow": [
       "Bash(python -c ' *)",
       "Bash(xargs grep *)",
-      "Bash(ipconfig)"
+      "Bash(ipconfig)",
+      "Bash(pip install *)"
     ]
   }
 }

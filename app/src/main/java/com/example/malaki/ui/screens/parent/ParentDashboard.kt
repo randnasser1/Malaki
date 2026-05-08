@@ -12,7 +12,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
@@ -26,13 +25,18 @@ import org.json.JSONObject
 import androidx.compose.ui.platform.LocalContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaType
 import android.util.Log
-import com.example.malaki.BuildConfig
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.sp
+import com.example.malaki.BuildConfig
+import com.example.malaki.ui.theme.*
 import java.util.Date
 import java.util.Locale
+import androidx.compose.ui.text.style.TextAlign
 // Data classes
 data class SentimentData(val day: String, val score: Int)
 data class WellbeingData(val category: String, val score: Int)
@@ -120,7 +124,7 @@ fun ParentDashboard(
             }
 
             // 🆕 LOAD TBATS ANALYSIS (Behavioral Change Detection)
-            loadTbatsAnalysis(childId) { result ->
+            loadTbatsAnalysis(context, childId) { result ->
                 android.util.Log.d("DASHBOARD", "TBATS result: ${result["concern_level"]}")
                 tbatsConcernLevel = result["concern_level"] as? String ?: "LOW"
                 tbatsMusicInsight = result["music_insight"] as? String ?: ""
@@ -310,243 +314,476 @@ fun ParentDashboard(
                     }
                 }
             } else {
-                // Interactive Emotion Calendar Card
+
+
+// Wellbeing Indicators Card (Tabbed: Journal Emotions vs Daily Mood Calendar)
                 item {
-                    var emotionData by remember { mutableStateOf<List<EmotionDayData>>(emptyList()) }
+                    var selectedWellbeingTab by remember { mutableStateOf(0) }
+                    var journalEmotions by remember { mutableStateOf<List<WellbeingData>>(emptyList()) }
+                    var moodData by remember { mutableStateOf<Map<String, String>>(emptyMap()) }  // date -> mood
+                    var journalData by remember { mutableStateOf<Map<String, String>>(emptyMap()) }  // date -> journal
                     var selectedDate by remember { mutableStateOf<String?>(null) }
-                    var selectedEmotion by remember { mutableStateOf<String?>(null) }
-                    var selectedSource by remember { mutableStateOf<String?>(null) }
+                    var currentMonth by remember { mutableStateOf(Calendar.getInstance()) }
+                    var isLoadingWellbeing by remember { mutableStateOf(true) }
 
                     LaunchedEffect(selectedChildId) {
                         if (selectedChildId != null && selectedChildId!!.isNotEmpty()) {
+                            isLoadingWellbeing = true
+
                             try {
                                 val firestore = FirebaseFirestore.getInstance()
-
-                                // 1. Get WELLBEING SUMMARY (child-logged moods)
-                                val wellbeingDocs = firestore.collection("wellbeing_daily_summary")
+                                val docs = firestore.collection("wellbeing_daily_summary")
                                     .whereEqualTo("childId", selectedChildId)
-                                    .orderBy("date", Query.Direction.DESCENDING)
-                                    .limit(30)
                                     .get()
                                     .await()
 
-                                val moodMap = mutableMapOf<String, Pair<String, String>>() // date -> (emotion, source)
+                                val moods = mutableMapOf<String, String>()
+                                val journals = mutableMapOf<String, String>()
+                                val emotionSums = mutableMapOf<String, Double>()
+                                var journalCount = 0
 
-                                for (doc in wellbeingDocs.documents) {
+                                for (doc in docs.documents) {
                                     val date = doc.getString("date") ?: continue
-                                    val emotion = doc.getString("dominantEmotion") ?:
-                                    when (doc.getDouble("avg_sentiment")?.toInt()) {
-                                        in 80..100 -> "great"
-                                        in 60..79 -> "good"
-                                        in 40..59 -> "okay"
-                                        in 20..39 -> "anxious"
-                                        else -> "sad"
+                                    val mood = doc.getString("dailyMood") ?: doc.getString("dominantEmotion")
+                                    val journal = doc.getString("journalText")
+                                    val journalSentiment = doc.getDouble("journalSentiment") ?: 0.5
+
+                                    if (mood != null) moods[date] = mood
+                                    if (!journal.isNullOrEmpty()) {
+                                        journals[date] = journal
+                                        journalCount++
+
+                                        // Build emotion analysis from journal text
+                                        val lowerJournal = journal.lowercase()
+                                        when {
+                                            lowerJournal.contains("happy") || lowerJournal.contains("great") || lowerJournal.contains("good") -> {
+                                                emotionSums["joy"] = (emotionSums["joy"] ?: 0.0) + (journalSentiment * 0.8)
+                                            }
+                                            lowerJournal.contains("sad") || lowerJournal.contains("depressed") || lowerJournal.contains("miss") -> {
+                                                emotionSums["sadness"] = (emotionSums["sadness"] ?: 0.0) + (1 - journalSentiment) * 0.9
+                                                emotionSums["grief"] = (emotionSums["grief"] ?: 0.0) + (1 - journalSentiment) * 0.7
+                                            }
+                                            lowerJournal.contains("anxious") || lowerJournal.contains("worried") || lowerJournal.contains("scared") -> {
+                                                emotionSums["nervousness"] = (emotionSums["nervousness"] ?: 0.0) + (1 - journalSentiment) * 0.8
+                                                emotionSums["fear"] = (emotionSums["fear"] ?: 0.0) + (1 - journalSentiment) * 0.6
+                                            }
+                                            lowerJournal.contains("love") -> {
+                                                emotionSums["love"] = (emotionSums["love"] ?: 0.0) + journalSentiment * 0.9
+                                            }
+                                            else -> {
+                                                emotionSums["neutral"] = (emotionSums["neutral"] ?: 0.0) + 0.5
+                                            }
+                                        }
                                     }
-                                    moodMap[date] = emotion to "📝 Child Logged"
                                 }
 
-                                // 2. Get MESSAGE ANALYSIS (inferred emotions)
-                                val messageDocs = firestore.collection("event_analysis")
-                                    .whereEqualTo("childId", selectedChildId)
-                                    .whereEqualTo("eventType", "MESSAGE")
-                                    .orderBy("timestamp", Query.Direction.DESCENDING)
-                                    .limit(200)
-                                    .get()
-                                    .await()
+                                moodData = moods
+                                journalData = journals
 
-                                val messageEmotions = mutableMapOf<String, MutableList<String>>()
-                                for (doc in messageDocs.documents) {
-                                    @Suppress("UNCHECKED_CAST")
-                                    val emotionVector = doc.get("emotionVector") as? Map<String, Double> ?: continue
-                                    val timestamp = doc.getLong("timestamp") ?: continue
-                                    val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(timestamp))
-
-                                    val topEmotion = emotionVector.maxByOrNull { it.value }?.key ?: continue
-                                    messageEmotions.getOrPut(date) { mutableListOf() }.add(topEmotion)
+                                journalEmotions = if (journalCount > 0 && emotionSums.isNotEmpty()) {
+                                    emotionSums.map { (emotion, sum) ->
+                                        WellbeingData(
+                                            category = emotion.replaceFirstChar { it.uppercase() },
+                                            score = ((sum / journalCount) * 100).toInt().coerceIn(0, 100)
+                                        )
+                                    }.sortedByDescending { it.score }.take(8)
+                                } else {
+                                    emptyList()
                                 }
-
-                                // Combine data
-                                val allDates = (moodMap.keys + messageEmotions.keys).distinct()
-                                emotionData = allDates.map { date ->
-                                    val (loggedEmotion, source) = moodMap[date] ?: (null to null)
-                                    val inferredEmotion = messageEmotions[date]?.groupingBy { it }?.eachCount()?.maxByOrNull { it.value }?.key
-
-                                    EmotionDayData(
-                                        date = date,
-                                        childLoggedEmotion = loggedEmotion,
-                                        inferredEmotion = inferredEmotion,
-                                        hasChildLog = source != null,
-                                        hasInferredData = inferredEmotion != null
-                                    )
-                                }.sortedByDescending { it.date }
 
                             } catch (e: Exception) {
-                                Log.e("DASHBOARD", "Error loading emotion calendar: ${e.message}")
+                                Log.e("DASHBOARD", "Error loading data: ${e.message}")
                             }
+
+                            isLoadingWellbeing = false
                         }
                     }
 
-                    DashboardCard(
-                        title = "Emotion Calendar",
-                        subtitle = "😊 Child-logged moods | 🤖 AI-inferred from messages",
-                        icon = "📅",
-                        iconColor = Color(0xFF8B5CF6)
-                    ) {
-                        if (emotionData.isEmpty()) {
-                            Text("No emotion data yet", color = Color(0xFF6B7280))
-                        } else {
-                            Column {
-                                // Legend
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
-                                    horizontalArrangement = Arrangement.SpaceEvenly
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.size(12.dp).background(Color(0xFF10B981), RoundedCornerShape(2.dp)))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Child-logged", fontSize = 10.sp, color = Color(0xFF6B7280))
-                                    }
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.size(12.dp).background(Color(0xFF8B5CF6), RoundedCornerShape(2.dp)))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("AI-inferred", fontSize = 10.sp, color = Color(0xFF6B7280))
-                                    }
-                                }
-
-                                // Calendar Grid (last 14 days)
-                                val dates = emotionData.take(14)
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    dates.chunked(7).forEach { week ->
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceEvenly
-                                        ) {
-                                            week.forEach { day ->
-                                                val dayOfMonth = day.date.substringAfterLast("-").toIntOrNull() ?: 0
-                                                val emotion = day.childLoggedEmotion ?: day.inferredEmotion
-                                                val bgColor = when (emotion) {
-                                                    "great", "happy" -> Color(0xFF10B981).copy(alpha = 0.8f)
-                                                    "good" -> Color(0xFF34D399).copy(alpha = 0.8f)
-                                                    "okay" -> Color(0xFFF59E0B).copy(alpha = 0.8f)
-                                                    "anxious" -> Color(0xFFF97316).copy(alpha = 0.8f)
-                                                    "sad" -> Color(0xFFEF4444).copy(alpha = 0.8f)
-                                                    else -> Color(0xFF9CA3AF).copy(alpha = 0.3f)
-                                                }
-                                                val borderColor = when {
-                                                    day.hasChildLog -> Color(0xFF10B981)
-                                                    day.hasInferredData -> Color(0xFF8B5CF6)
-                                                    else -> Color(0xFFE5E7EB)
-                                                }
-
-                                                Column(
-                                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                                    modifier = Modifier
-                                                        .size(44.dp)
-                                                        .clip(RoundedCornerShape(8.dp))
-                                                        .background(bgColor)
-                                                        .border(2.dp, borderColor, RoundedCornerShape(8.dp))
-                                                        .clickable {
-                                                            selectedDate = day.date
-                                                            selectedEmotion = emotion
-                                                            selectedSource = when {
-                                                                day.hasChildLog -> "Child manually logged"
-                                                                day.hasInferredData -> "AI inferred from messages"
-                                                                else -> "No data"
-                                                            }
-                                                        }
-                                                ) {
-                                                    Spacer(modifier = Modifier.weight(1f))
-                                                    Text(
-                                                        text = dayOfMonth.toString(),
-                                                        color = if (emotion != null) Color.White else Color(0xFF6B7280),
-                                                        fontSize = 12.sp,
-                                                        fontWeight = FontWeight.Medium
-                                                    )
-                                                    Spacer(modifier = Modifier.weight(1f))
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Selected date details
-                                if (selectedDate != null && selectedEmotion != null) {
-                                    Spacer(modifier = Modifier.height(12.dp))
-                                    Surface(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        shape = RoundedCornerShape(8.dp),
-                                        color = Color(0xFFF3F4F6)
-                                    ) {
-                                        Column(modifier = Modifier.padding(12.dp)) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text("📅 ", fontSize = 16.sp)
-                                                Text(
-                                                    text = SimpleDateFormat("EEEE, MMMM d", Locale.getDefault())
-                                                        .format(SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(selectedDate!!) ?: Date()),
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 14.sp
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                val emoji = when (selectedEmotion?.lowercase()) {
-                                                    "great", "happy" -> "😊"
-                                                    "good" -> "👍"
-                                                    "okay" -> "😐"
-                                                    "anxious" -> "😰"
-                                                    "sad" -> "😢"
-                                                    else -> "❓"
-                                                }
-                                                Text("$emoji ", fontSize = 16.sp)
-                                                Text(selectedEmotion?.replaceFirstChar { it.uppercase() } ?: "Unknown", fontWeight = FontWeight.Medium)
-                                                Spacer(modifier = Modifier.width(12.dp))
-                                                Surface(
-                                                    shape = RoundedCornerShape(4.dp),
-                                                    color = if (selectedSource?.contains("Child") == true) Color(0xFF10B981).copy(alpha = 0.15f) else Color(0xFF8B5CF6).copy(alpha = 0.15f)
-                                                ) {
-                                                    Text(
-                                                        text = selectedSource?.let { if (it.contains("Child")) "📝 $it" else "🤖 $it" } ?: "❓ No data",
-                                                        fontSize = 10.sp,
-                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-
-
-                // Wellbeing Indicators Card
-                item {
                     DashboardCard(
                         title = "Wellbeing Indicators",
-                        subtitle = "DistilBERT emotion analysis from messages & journal",
-                        icon = "🛡️",
+                        subtitle = if (selectedWellbeingTab == 0) "📝 AI-analyzed from journal entries" else "😊 Daily mood check-ins",
+                        icon = if (selectedWellbeingTab == 0) "📝" else "📅",
                         iconColor = Color(0xFF10B981)
                     ) {
-                        if (wellbeingData.isEmpty() || wellbeingData.all { it.score == 0 }) {
-                            Text("Emotion data will appear here once messages are analyzed", color = Color(0xFF6B7280))
-                        } else {
-                            SimpleBarChartHorizontal(data = wellbeingData)
+                        Column {
+                            // Tab Row
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0xFFF3F4F6), RoundedCornerShape(12.dp))
+                                    .padding(4.dp)
+                            ) {
+                                Surface(
+                                    modifier = Modifier.weight(1f).clickable { selectedWellbeingTab = 0 },
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (selectedWellbeingTab == 0) Color.White else Color.Transparent,
+                                    shadowElevation = if (selectedWellbeingTab == 0) 2.dp else 0.dp
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.Center,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("📝", fontSize = 14.sp)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Journal Analysis", fontSize = 13.sp, color = if (selectedWellbeingTab == 0) Color(0xFF1F2937) else Color(0xFF6B7280))
+                                    }
+                                }
+                                Surface(
+                                    modifier = Modifier.weight(1f).clickable { selectedWellbeingTab = 1 },
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (selectedWellbeingTab == 1) Color.White else Color.Transparent,
+                                    shadowElevation = if (selectedWellbeingTab == 1) 2.dp else 0.dp
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.Center,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("📅", fontSize = 14.sp)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Mood Calendar", fontSize = 13.sp, color = if (selectedWellbeingTab == 1) Color(0xFF1F2937) else Color(0xFF6B7280))
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            when {
+                                isLoadingWellbeing -> {
+                                    Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                                        CircularProgressIndicator(color = Color(0xFF10B981), modifier = Modifier.size(32.dp))
+                                    }
+                                }
+                                selectedWellbeingTab == 0 -> {
+                                    if (journalEmotions.isEmpty()) {
+                                        Text("No journal entries yet. Write a journal to see AI-analyzed emotions!", color = Color(0xFF6B7280), fontSize = 13.sp, modifier = Modifier.padding(8.dp))
+                                    } else {
+                                        SimpleBarChartHorizontal(data = journalEmotions)
+                                    }
+                                }
+                                else -> {
+                                    if (moodData.isEmpty()) {
+                                        Text("No mood data yet. Ask your child to check in daily!", color = Color(0xFF6B7280), fontSize = 13.sp, modifier = Modifier.padding(8.dp))
+                                    } else {
+                                        // CALENDAR VIEW (Same as child's calendar)
+                                        val monthNames = listOf("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
+                                        val dayNames = listOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+
+                                        // Calculate calendar days
+                                        val calendar = Calendar.getInstance().apply {
+                                            time = currentMonth.time
+                                            set(Calendar.DAY_OF_MONTH, 1)
+                                        }
+                                        val daysInMonth = calendar.getActualMaximum(Calendar.DAY_OF_MONTH)
+                                        val firstDayOfWeek = calendar.get(Calendar.DAY_OF_WEEK) - 1
+
+                                        Column {
+                                            // Month navigation
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                IconButton(onClick = {
+                                                    currentMonth = Calendar.getInstance().apply {
+                                                        time = currentMonth.time
+                                                        add(Calendar.MONTH, -1)
+                                                    }
+                                                }) {
+                                                    Text("◀", color = Color(0xFF6B7280))
+                                                }
+                                                Text(
+                                                    text = "${monthNames[currentMonth.get(Calendar.MONTH)]} ${currentMonth.get(Calendar.YEAR)}",
+                                                    color = Color(0xFF374151),
+                                                    fontSize = 16.sp,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                                IconButton(onClick = {
+                                                    currentMonth = Calendar.getInstance().apply {
+                                                        time = currentMonth.time
+                                                        add(Calendar.MONTH, 1)
+                                                    }
+                                                }) {
+                                                    Text("▶", color = Color(0xFF6B7280))
+                                                }
+                                            }
+
+                                            Spacer(modifier = Modifier.height(8.dp))
+
+                                            // Day names
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceEvenly
+                                            ) {
+                                                dayNames.forEach { day ->
+                                                    Text(
+                                                        text = day,
+                                                        color = Color(0xFF9CA3AF),
+                                                        fontSize = 11.sp,
+                                                        modifier = Modifier.weight(1f),
+                                                        textAlign = TextAlign.Center
+                                                    )
+                                                }
+                                            }
+
+                                            Spacer(modifier = Modifier.height(8.dp))
+
+                                            // Calendar grid
+                                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                var dayCounter = 1
+                                                for (row in 0 until 6) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.SpaceEvenly
+                                                    ) {
+                                                        for (col in 0 until 7) {
+                                                            val cellIndex = row * 7 + col
+                                                            val isVisible = cellIndex >= firstDayOfWeek && dayCounter <= daysInMonth
+                                                            val dayNum = if (isVisible) dayCounter else 0
+                                                            val dateStr = if (dayNum > 0) {
+                                                                String.format("%04d-%02d-%02d",
+                                                                    currentMonth.get(Calendar.YEAR),
+                                                                    currentMonth.get(Calendar.MONTH) + 1,
+                                                                    dayNum
+                                                                )
+                                                            } else null
+
+                                                            val mood = dateStr?.let { moodData[it] }
+                                                            val bgColor = when (mood) {
+                                                                "great" -> Color(0xFF10B981)
+                                                                "good" -> Color(0xFF34D399)
+                                                                "okay" -> Color(0xFFF59E0B)
+                                                                "anxious" -> Color(0xFFF97316)
+                                                                "sad" -> Color(0xFFEF4444)
+                                                                else -> Color(0xFFF3F4F6)
+                                                            }
+                                                            val emoji = when (mood) {
+                                                                "great", "good" -> "😊"
+                                                                "okay" -> "😐"
+                                                                "anxious" -> "😰"
+                                                                "sad" -> "😢"
+                                                                else -> null
+                                                            }
+
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .weight(1f)
+                                                                    .aspectRatio(1f)
+                                                                    .padding(2.dp)
+                                                                    .clip(RoundedCornerShape(8.dp))
+                                                                    .background(bgColor)
+                                                                    .clickable(enabled = dateStr != null) {
+                                                                        if (dateStr != null) selectedDate = dateStr
+                                                                    },
+                                                                contentAlignment = Alignment.Center
+                                                            ) {
+                                                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                                                    if (emoji != null) {
+                                                                        Text(emoji, fontSize = 18.sp)
+                                                                    }
+                                                                    if (dayNum > 0) {
+                                                                        Text(
+                                                                            text = dayNum.toString(),
+                                                                            color = if (mood != null) Color.White else Color(0xFF9CA3AF),
+                                                                            fontSize = 10.sp,
+                                                                            fontWeight = FontWeight.Medium
+                                                                        )
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            if (isVisible) dayCounter++
+                                                        }
+                                                    }
+                                                    if (dayCounter > daysInMonth) break
+                                                }
+                                            }
+
+                                            // Selected day details
+                                            if (selectedDate != null) {
+                                                Spacer(modifier = Modifier.height(12.dp))
+                                                Surface(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    shape = RoundedCornerShape(12.dp),
+                                                    color = Color(0xFFF3F4F6)
+                                                ) {
+                                                    Column(modifier = Modifier.padding(12.dp)) {
+                                                        Text(
+                                                            text = try {
+                                                                val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(selectedDate!!)
+                                                                SimpleDateFormat("EEEE, MMMM d, yyyy", Locale.getDefault()).format(date ?: Date())
+                                                            } catch (e: Exception) { selectedDate!! },
+                                                            fontWeight = FontWeight.Bold,
+                                                            fontSize = 13.sp
+                                                        )
+                                                        Spacer(modifier = Modifier.height(6.dp))
+
+                                                        val mood = moodData[selectedDate]
+                                                        if (mood != null) {
+                                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                                val moodEmoji = when (mood) {
+                                                                    "great", "good" -> "😊"
+                                                                    "okay" -> "😐"
+                                                                    "anxious" -> "😰"
+                                                                    "sad" -> "😢"
+                                                                    else -> "❓"
+                                                                }
+                                                                Text("$moodEmoji Mood: ", fontSize = 12.sp, color = Color(0xFF6B7280))
+                                                                Text(
+                                                                    mood.replaceFirstChar { it.uppercase() },
+                                                                    color = when (mood) {
+                                                                        "great", "good" -> Color(0xFF10B981)
+                                                                        "okay" -> Color(0xFFF59E0B)
+                                                                        "anxious" -> Color(0xFFF97316)
+                                                                        "sad" -> Color(0xFFEF4444)
+                                                                        else -> Color(0xFF6B7280)
+                                                                    },
+                                                                    fontWeight = FontWeight.Medium,
+                                                                    fontSize = 12.sp
+                                                                )
+                                                            }
+                                                        }
+
+                                                        val journal = journalData[selectedDate]
+                                                        if (!journal.isNullOrEmpty()) {
+                                                            Spacer(modifier = Modifier.height(6.dp))
+                                                            Text("📝 Journal:", fontSize = 12.sp, color = Color(0xFF6B7280))
+                                                            Text(
+                                                                journal.take(150) + if (journal.length > 150) "..." else "",
+                                                                fontSize = 12.sp,
+                                                                color = Color(0xFF374151)
+                                                            )
+                                                        }
+
+                                                        if (mood == null && journal == null) {
+                                                            Text("No entries for this day", fontSize = 12.sp, color = Color(0xFF9CA3AF))
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-
-
-                // Music Insights Card
+                // Music Insights Card — Day / Week toggle
                 item {
+                    var musicView by remember { mutableStateOf("week") }
+                    var musicDayOffset by remember { mutableStateOf(0) }
+                    var dailyMusicEmotions by remember { mutableStateOf<List<Pair<String, Int>>>(emptyList()) }
+                    var loadingMusicDay by remember { mutableStateOf(false) }
+
+                    LaunchedEffect(selectedChildId, musicView, musicDayOffset) {
+                        if (musicView != "day" || selectedChildId == null) return@LaunchedEffect
+                        loadingMusicDay = true
+                        try {
+                            val cal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -musicDayOffset) }
+                            val targetDate = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(cal.time)
+
+                            val docs = FirebaseFirestore.getInstance()
+                                .collection("music_tracking")
+                                .whereEqualTo("childId", selectedChildId)
+                                .limit(50).get().await()
+
+                            val counts = mutableMapOf<String, Int>()
+                            for (doc in docs.documents) {
+                                if (doc.getBoolean("emotion_processed") != true) continue
+                                @Suppress("UNCHECKED_CAST")
+                                val results = doc.get("emotion_results") as? List<Map<String, Any>> ?: continue
+                                for (entry in results) {
+                                    if (entry["date"] != targetDate) continue
+                                    val emotion = entry["emotion"] as? String ?: continue
+                                    counts[emotion] = (counts[emotion] ?: 0) + 1
+                                }
+                            }
+                            dailyMusicEmotions = counts.entries
+                                .sortedByDescending { it.value }
+                                .map { it.key to it.value }
+                        } catch (_: Exception) { dailyMusicEmotions = emptyList() }
+                        loadingMusicDay = false
+                    }
+
+                    val musicDayLabel = when (musicDayOffset) { 0 -> "Today"; 1 -> "Yesterday"; else -> "$musicDayOffset days ago" }
+
                     DashboardCard(
                         title = "Music Insights",
-                        subtitle = "Mood detected from recently played tracks",
+                        subtitle = if (musicView == "week") "Mood detected from recently played tracks"
+                                   else "Tracks listened $musicDayLabel",
                         icon = "🎵",
                         iconColor = Color(0xFF8B5CF6)
                     ) {
-                        MusicMoodSection(musicInsights)
+                        // Toggle
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
+                                .background(Color(0xFFF9FAFB), RoundedCornerShape(50)).padding(4.dp)
+                        ) {
+                            listOf("week" to "Recent Mood", "day" to "Per Day").forEach { (v, lbl) ->
+                                Box(
+                                    modifier = Modifier.weight(1f)
+                                        .background(if (musicView == v) Color(0xFF8B5CF6) else Color.Transparent, RoundedCornerShape(50))
+                                        .clickable { musicView = v }
+                                        .padding(vertical = 6.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(lbl, color = if (musicView == v) Color.White else Color(0xFF6B7280),
+                                        fontSize = 12.sp, fontWeight = if (musicView == v) FontWeight.SemiBold else FontWeight.Normal)
+                                }
+                            }
+                        }
+
+                        if (musicView == "week") {
+                            MusicMoodSection(musicInsights)
+                        } else {
+                            // Day navigator
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(onClick = { if (musicDayOffset < 6) musicDayOffset++ }) {
+                                    Text("◀", color = if (musicDayOffset < 6) Color(0xFF374151) else Color(0xFFD1D5DB), fontSize = 18.sp)
+                                }
+                                Text(musicDayLabel, fontWeight = FontWeight.Medium, color = Color(0xFF374151), fontSize = 14.sp)
+                                IconButton(onClick = { if (musicDayOffset > 0) musicDayOffset-- }) {
+                                    Text("▶", color = if (musicDayOffset > 0) Color(0xFF374151) else Color(0xFFD1D5DB), fontSize = 18.sp)
+                                }
+                            }
+                            if (loadingMusicDay) {
+                                Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Color(0xFF8B5CF6))
+                                }
+                            } else if (dailyMusicEmotions.isEmpty()) {
+                                Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("🎵", fontSize = 28.sp)
+                                    Spacer(Modifier.height(4.dp))
+                                    Text("No music tracked $musicDayLabel", color = Color(0xFF9CA3AF), fontSize = 13.sp)
+                                }
+                            } else {
+                                val maxCount = dailyMusicEmotions.maxOf { it.second }.coerceAtLeast(1)
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    dailyMusicEmotions.forEach { (emotion, count) ->
+                                        val emoji = MUSIC_MOOD_EMOJIS[emotion] ?: "🎵"
+                                        val color = MUSIC_MOOD_COLORS[emotion] ?: Color(0xFF8B5CF6)
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(emoji, fontSize = 16.sp, modifier = Modifier.width(26.dp))
+                                            Text(emotion.replaceFirstChar { it.uppercase() },
+                                                color = Color(0xFF374151), fontSize = 13.sp, modifier = Modifier.width(90.dp))
+                                            Box(Modifier.weight(1f).height(8.dp)
+                                                .background(Color(0xFFE5E7EB), RoundedCornerShape(4.dp))) {
+                                                Box(Modifier.fillMaxHeight().fillMaxWidth(count.toFloat() / maxCount)
+                                                    .background(color, RoundedCornerShape(4.dp)))
+                                            }
+                                            Spacer(Modifier.width(8.dp))
+                                            Text("$count", color = color, fontSize = 12.sp,
+                                                fontWeight = FontWeight.SemiBold, modifier = Modifier.width(28.dp))
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -558,18 +795,22 @@ fun ParentDashboard(
                         if (selectedChildId != null && selectedChildId!!.isNotEmpty()) {
                             try {
                                 val firestore = FirebaseFirestore.getInstance()
-                                val docs = firestore.collection("event_analysis")
+                                // Single-field filter only — avoids composite index requirement
+                                val raw = firestore.collection("event_analysis")
                                     .whereEqualTo("childId", selectedChildId)
-                                    .whereEqualTo("eventType", "MESSAGE")
-                                    .orderBy("timestamp", Query.Direction.DESCENDING)
-                                    .limit(20)
+                                    .limit(60)
                                     .get()
                                     .await()
+
+                                val relevant = raw.documents
+                                    .filter { it.getString("eventType") in listOf("MESSAGE", "JOURNAL") }
+                                    .sortedByDescending { it.getLong("timestamp") ?: 0L }
+                                    .take(20)
 
                                 val emotionSums = mutableMapOf<String, Float>()
                                 var count = 0
 
-                                for (doc in docs.documents) {
+                                for (doc in relevant) {
                                     @Suppress("UNCHECKED_CAST")
                                     val vector = doc.get("emotionVector") as? Map<String, Any> ?: continue
                                     count++
@@ -596,12 +837,12 @@ fun ParentDashboard(
 
                     DashboardCard(
                         title = "Current Emotions",
-                        subtitle = "From recent messages (last 20)",
+                        subtitle = "DistilBERT analysis — last 20 messages & journals",
                         icon = "😊",
                         iconColor = Color(0xFF8B5CF6)
                     ) {
                         if (topEmotions.isEmpty()) {
-                            Text("No message data yet", color = Color(0xFF6B7280), modifier = Modifier.padding(8.dp))
+                            Text("No analyzed events yet", color = Color(0xFF6B7280), modifier = Modifier.padding(8.dp))
                         } else {
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                 topEmotions.forEach { (emotion, score) ->
@@ -645,15 +886,112 @@ fun ParentDashboard(
                     }
                 }
 
-// App Usage Card
+// App Usage Card — Day / Week toggle
                 item {
+                    var appView by remember { mutableStateOf("week") }
+                    var dayOffset by remember { mutableStateOf(0) }
+                    var dailyApps by remember { mutableStateOf<List<AppUsageItem>>(emptyList()) }
+                    var dailyTotalMin by remember { mutableStateOf(0L) }
+                    var loadingDay by remember { mutableStateOf(false) }
+
+                    LaunchedEffect(selectedChildId, appView, dayOffset) {
+                        if (appView != "day" || selectedChildId == null) return@LaunchedEffect
+                        loadingDay = true
+                        try {
+                            val cal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -dayOffset) }
+                            val dayStart = Calendar.getInstance().apply {
+                                time = cal.time
+                                set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+                                set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+                            }.timeInMillis
+                            val dayEnd = dayStart + 24 * 60 * 60 * 1000L
+
+                            val docs = FirebaseFirestore.getInstance()
+                                .collection("app_usage")
+                                .whereEqualTo("childId", selectedChildId)
+                                .limit(30)
+                                .get().await()
+
+                            val dayDoc = docs.documents.firstOrNull {
+                                (it.getLong("timestamp") ?: 0L) in dayStart..dayEnd
+                            }
+                            if (dayDoc != null) {
+                                dailyTotalMin = dayDoc.getLong("totalTimeMin") ?: 0L
+                                @Suppress("UNCHECKED_CAST")
+                                dailyApps = (dayDoc.get("apps") as? List<Map<String, Any>> ?: emptyList())
+                                    .mapNotNull {
+                                        val n = it["app_name"] as? String ?: return@mapNotNull null
+                                        val t = (it["time_min"] as? Long) ?: (it["time_min"] as? Int)?.toLong() ?: 0L
+                                        AppUsageItem(n, t)
+                                    }.sortedByDescending { it.timeMin }
+                            } else { dailyApps = emptyList(); dailyTotalMin = 0L }
+                        } catch (_: Exception) { dailyApps = emptyList() }
+                        loadingDay = false
+                    }
+
+                    val dayLabel = when (dayOffset) { 0 -> "Today"; 1 -> "Yesterday"; else -> "$dayOffset days ago" }
+
                     DashboardCard(
                         title = "App Usage",
-                        subtitle = appUsage["screenTime"] ?: "No data yet",
+                        subtitle = if (appView == "week") appUsage["screenTime"] ?: "No data yet"
+                                   else "$dayLabel — ${formatAppTime(dailyTotalMin)}",
                         icon = "📱",
                         iconColor = Color(0xFFF59E0B)
                     ) {
-                        AppUsageSection(topAppsList)
+                        // Toggle
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
+                                .background(Color(0xFFF9FAFB), RoundedCornerShape(50)).padding(4.dp)
+                        ) {
+                            listOf("week" to "7-Day Avg", "day" to "Per Day").forEach { (v, lbl) ->
+                                Box(
+                                    modifier = Modifier.weight(1f)
+                                        .background(if (appView == v) Color(0xFFF59E0B) else Color.Transparent, RoundedCornerShape(50))
+                                        .clickable { appView = v }
+                                        .padding(vertical = 6.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(lbl, color = if (appView == v) Color.White else Color(0xFF6B7280),
+                                        fontSize = 12.sp, fontWeight = if (appView == v) FontWeight.SemiBold else FontWeight.Normal)
+                                }
+                            }
+                        }
+
+                        if (appView == "week") {
+                            if (appUsage["productiveTime"] != null) {
+                                Text(appUsage["productiveTime"]!!, color = Color(0xFF9CA3AF), fontSize = 11.sp,
+                                    modifier = Modifier.padding(bottom = 8.dp))
+                            }
+                            AppUsageSection(topAppsList)
+                        } else {
+                            // Day navigator
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(onClick = { if (dayOffset < 6) dayOffset++ }) {
+                                    Text("◀", color = if (dayOffset < 6) Color(0xFF374151) else Color(0xFFD1D5DB), fontSize = 18.sp)
+                                }
+                                Text(dayLabel, fontWeight = FontWeight.Medium, color = Color(0xFF374151), fontSize = 14.sp)
+                                IconButton(onClick = { if (dayOffset > 0) dayOffset-- }) {
+                                    Text("▶", color = if (dayOffset > 0) Color(0xFF374151) else Color(0xFFD1D5DB), fontSize = 18.sp)
+                                }
+                            }
+                            if (loadingDay) {
+                                Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Color(0xFFF59E0B))
+                                }
+                            } else if (dailyApps.isEmpty()) {
+                                Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("📱", fontSize = 28.sp)
+                                    Spacer(Modifier.height(4.dp))
+                                    Text("No usage data for $dayLabel", color = Color(0xFF9CA3AF), fontSize = 13.sp)
+                                }
+                            } else {
+                                AppUsageSection(dailyApps.take(5))
+                            }
+                        }
                     }
                 }
 
@@ -672,40 +1010,121 @@ fun ParentDashboard(
                     }
                 }
 
-                // Behavioral Pattern Analysis (TBATS)
+                // Behavioral Pattern Analysis (TBATS + local stats)
                 item {
+                    var localEventCount by remember { mutableStateOf(0) }
+                    var localHighRisk by remember { mutableStateOf(0) }
+                    var localAvgSentiment by remember { mutableStateOf<Float?>(null) }
+                    var localDominantEmotion by remember { mutableStateOf<String?>(null) }
+
+                    // Load local stats from event_analysis regardless of TBATS availability
+                    LaunchedEffect(selectedChildId) {
+                        if (selectedChildId == null) return@LaunchedEffect
+                        try {
+                            val raw = FirebaseFirestore.getInstance()
+                                .collection("event_analysis")
+                                .whereEqualTo("childId", selectedChildId)
+                                .limit(60).get().await()
+
+                            val sevenDaysAgo = System.currentTimeMillis() - 7 * 24 * 60 * 60 * 1000L
+                            val recent = raw.documents.filter { (it.getLong("timestamp") ?: 0L) >= sevenDaysAgo }
+                            localEventCount = recent.size
+                            localHighRisk = recent.count { it.getString("riskLevel") in listOf("HIGH", "CRITICAL") }
+
+                            val sentiments = recent.mapNotNull { it.getDouble("sentimentScore")?.toFloat() }
+                            if (sentiments.isNotEmpty()) localAvgSentiment = sentiments.average().toFloat()
+
+                            val emotionCounts = mutableMapOf<String, Float>()
+                            recent.forEach { doc ->
+                                @Suppress("UNCHECKED_CAST")
+                                val vec = doc.get("emotionVector") as? Map<String, Any> ?: return@forEach
+                                vec.forEach { (e, v) ->
+                                    val s = when (v) { is Double -> v.toFloat(); is Float -> v; else -> 0f }
+                                    emotionCounts[e] = (emotionCounts[e] ?: 0f) + s
+                                }
+                            }
+                            localDominantEmotion = emotionCounts.maxByOrNull { it.value }?.key
+                        } catch (_: Exception) {}
+                    }
+
                     val concernColor = when (tbatsConcernLevel) {
                         "HIGH" -> Color(0xFFEF4444)
                         "MEDIUM" -> Color(0xFFF59E0B)
                         else -> Color(0xFF10B981)
                     }
+                    val noTbatsInsights = tbatsMusicInsight.isEmpty() && tbatsUsageInsight.isEmpty()
+
                     DashboardCard(
                         title = "Behavioral Pattern Analysis",
-                        subtitle = "AI-detected changes in digital behavior over 30 days",
+                        subtitle = "AI-detected changes in digital behavior",
                         icon = "🧠",
                         iconColor = concernColor
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Surface(
-                                shape = RoundedCornerShape(50),
-                                color = concernColor.copy(alpha = 0.15f)
-                            ) {
+                            // TBATS concern badge
+                            Surface(shape = RoundedCornerShape(50), color = concernColor.copy(alpha = 0.15f)) {
                                 Text(
                                     text = "Concern Level: $tbatsConcernLevel",
-                                    color = concernColor,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp,
+                                    color = concernColor, fontWeight = FontWeight.Bold, fontSize = 13.sp,
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                                 )
                             }
-                            if (tbatsMusicInsight.isNotEmpty()) {
-                                Text(tbatsMusicInsight, color = Color(0xFF374151), fontSize = 13.sp)
+
+                            if (!noTbatsInsights) {
+                                if (tbatsMusicInsight.isNotEmpty()) Text(tbatsMusicInsight, color = Color(0xFF374151), fontSize = 13.sp)
+                                if (tbatsUsageInsight.isNotEmpty()) Text(tbatsUsageInsight, color = Color(0xFF374151), fontSize = 13.sp)
+                            } else {
+                                // TBATS needs 14+ days of data — show local stats as substitute
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0xFFFFF8E7)
+                                ) {
+                                    Text(
+                                        "⏳ Pattern analysis needs 14+ days of data. Showing 7-day snapshot below.",
+                                        color = Color(0xFF92400E), fontSize = 11.sp,
+                                        modifier = Modifier.padding(8.dp)
+                                    )
+                                }
                             }
-                            if (tbatsUsageInsight.isNotEmpty()) {
-                                Text(tbatsUsageInsight, color = Color(0xFF374151), fontSize = 13.sp)
-                            }
-                            if (tbatsMusicInsight.isEmpty() && tbatsUsageInsight.isEmpty()) {
-                                Text("Collecting behavioral data...", color = Color(0xFF6B7280), fontSize = 13.sp)
+
+                            // Always show local 7-day stats
+                            if (localEventCount > 0) {
+                                Spacer(Modifier.height(4.dp))
+                                Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFF3F4F6)))
+                                Spacer(Modifier.height(4.dp))
+                                Text("Last 7 Days — Quick Stats", color = Color(0xFF6B7280), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    StatChip("📊 $localEventCount events", Color(0xFF3B82F6))
+                                    if (localHighRisk > 0) StatChip("🚨 $localHighRisk alerts", Color(0xFFEF4444))
+                                    else StatChip("✅ 0 alerts", Color(0xFF10B981))
+                                }
+                                localAvgSentiment?.let { s ->
+                                    val sentLabel = when {
+                                        s >= 0.65f -> "Positive mood"
+                                        s >= 0.45f -> "Neutral mood"
+                                        else -> "Low mood signals"
+                                    }
+                                    val sentColor = when {
+                                        s >= 0.65f -> Color(0xFF10B981)
+                                        s >= 0.45f -> Color(0xFFF59E0B)
+                                        else -> Color(0xFFEF4444)
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("Avg sentiment: ", color = Color(0xFF6B7280), fontSize = 12.sp)
+                                        Surface(shape = RoundedCornerShape(4.dp), color = sentColor.copy(alpha = 0.12f)) {
+                                            Text(sentLabel, color = sentColor, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                        }
+                                    }
+                                }
+                                localDominantEmotion?.let { emotion ->
+                                    val emoji = EMOTION_EMOJIS[emotion] ?: "😐"
+                                    Text("$emoji Dominant emotion: ${emotion.replaceFirstChar { it.uppercase() }}",
+                                        color = Color(0xFF374151), fontSize = 12.sp)
+                                }
+                            } else if (noTbatsInsights) {
+                                Text("No events analyzed yet — messages will appear here once sent.", color = Color(0xFF9CA3AF), fontSize = 12.sp)
                             }
                         }
                     }
@@ -768,7 +1187,8 @@ data class RiskAlert(
     val riskLevel: String,
     val blockReasons: List<String>,
     val confidenceScore: Float,
-    val timestamp: Long
+    val timestamp: Long,
+    val messageText: String = ""
 )
 
 @Composable
@@ -875,17 +1295,43 @@ fun RiskAlertsCard(
         }
     }
 }
-// Add this function to load TBATS analysis
-fun loadTbatsAnalysis(childId: String, onResult: (Map<String, Any>) -> Unit) {
+fun loadTbatsAnalysis(context: android.content.Context, childId: String, onResult: (Map<String, Any>) -> Unit) {
     GlobalScope.launch {
-        try {
-            val client = OkHttpClient.Builder()
-                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .build()
+        val auth = FirebaseAuth.getInstance()
+        val idToken = try {
+            auth.currentUser?.getIdToken(false)?.await()?.token
+        } catch (e: Exception) {
+            null
+        }
 
+        val client = OkHttpClient.Builder()
+            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+
+        // Step 1: trigger music emotion classification before TBATS reads the results.
+        // Fire-and-wait so TBATS sees the freshly processed tracks.
+        try {
+            val processRequest = Request.Builder()
+                .url("${BuildConfig.BACKEND_BASE_URL}/music/process/$childId")
+                .apply { if (idToken != null) addHeader("Authorization", "Bearer $idToken") }
+                .post("".toRequestBody("application/json".toMediaType()))
+                .build()
+            client.newCall(processRequest).execute().close()
+            Log.d("TBATS", "✅ music/process done for $childId")
+        } catch (e: Exception) {
+            Log.w("TBATS", "music/process failed (non-fatal): ${e.message}")
+        }
+
+        // Step 2: run TBATS analysis
+        try {
             val request = Request.Builder()
                 .url("${BuildConfig.BACKEND_BASE_URL}/analyze/tbats/$childId?days=30")
+                .apply {
+                    if (idToken != null) {
+                        addHeader("Authorization", "Bearer $idToken")
+                    }
+                }
                 .get()
                 .build()
 
@@ -983,6 +1429,7 @@ fun RiskAlertRow(alert: RiskAlert) {
         border = androidx.compose.foundation.BorderStroke(1.dp, statusColor.copy(alpha = 0.2f))
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
+            // Header row with risk level and time
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -995,7 +1442,7 @@ fun RiskAlertRow(alert: RiskAlert) {
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = alert.riskLevel,
+                        text = "${alert.riskLevel} RISK DETECTED",
                         color = statusColor,
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp
@@ -1010,30 +1457,39 @@ fun RiskAlertRow(alert: RiskAlert) {
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Truncated URL
-            Text(
-                text = alert.url.take(60) + if (alert.url.length > 60) "..." else "",
-                color = Color(0xFF1F2937),
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium
-            )
+            // 🆕 Show the actual message that triggered the alert
+            if (alert.messageText.isNotEmpty()) {
+                Text(
+                    text = "⚠️ ${alert.messageText.take(150)}${if (alert.messageText.length > 150) "..." else ""}",
+                    color = Color(0xFF1F2937),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
 
+            // Show block reasons (grooming reason)
             if (alert.blockReasons.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(4.dp))
                 alert.blockReasons.take(2).forEach { reason ->
                     Text(
-                        text = "• $reason",
+                        text = "🔍 $reason",
                         color = Color(0xFF6B7280),
                         fontSize = 11.sp
                     )
                 }
                 if (alert.blockReasons.size > 2) {
                     Text(
-                        text = "• +${alert.blockReasons.size - 2} more",
+                        text = "🔍 +${alert.blockReasons.size - 2} more",
                         color = Color(0xFF9CA3AF),
                         fontSize = 10.sp
                     )
                 }
+            } else {
+                Text(
+                    text = "🔍 High grooming probability detected",
+                    color = Color(0xFF6B7280),
+                    fontSize = 11.sp
+                )
             }
 
             Spacer(modifier = Modifier.height(4.dp))
@@ -1157,11 +1613,22 @@ fun loadDashboardDataFromFirebase(
 
             // ========== WELLBEING INDICATORS: DistilBERT emotion averages ==========
             // Pull last 200 analyzed events for this child from Firestore
+            // Add this inside loadDashboardDataFromFirebase, right after getting emotionDocs
             val emotionDocs = firestore.collection("event_analysis")
                 .whereEqualTo("childId", childId)
                 .limit(200)
                 .get()
                 .await()
+
+            Log.d("DASHBOARD_DEBUG", "=== EMOTION DOCS DEBUG ===")
+            Log.d("DASHBOARD_DEBUG", "Total docs found: ${emotionDocs.documents.size}")
+
+            for (doc in emotionDocs.documents) {
+                val eventType = doc.getString("eventType")
+                val hasVector = doc.get("emotionVector") != null
+                Log.d("DASHBOARD_DEBUG", "Doc ${doc.id}: eventType=$eventType, hasEmotionVector=$hasVector")
+            }
+
 
             val emotionSums = mutableMapOf<String, Double>()
             var emotionEventCount = 0
@@ -1196,6 +1663,9 @@ fun loadDashboardDataFromFirebase(
                 listOf(WellbeingData("No data yet", 0))
             }
             // ========== END WELLBEING INDICATORS ==========
+// Then later after filtering
+            Log.d("DASHBOARD_DEBUG", "After filtering: emotionEventCount=$emotionEventCount")
+            Log.d("DASHBOARD_DEBUG", "emotionSums size: ${emotionSums.size}")
 
             val safety = listOf(
                 SafetyIndicator("Content Safety", "none", "No risks detected"),
@@ -1259,7 +1729,6 @@ fun loadDashboardDataFromFirebase(
         }
     }
 }
-// ========== LOAD ALERTS FUNCTION ==========
 fun loadAlertsFromFirebase(
     context: android.content.Context,
     childId: String,
@@ -1270,14 +1739,12 @@ fun loadAlertsFromFirebase(
             val firestore = FirebaseFirestore.getInstance()
             val twentyFourHoursAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
 
-            // Single-field filter only — no composite index required; filter by time in Kotlin
             val assessments = firestore.collection("risk_assessment")
                 .whereEqualTo("childId", childId)
                 .limit(100)
                 .get()
                 .await()
 
-            // Create alerts without exposing URLs; filter last 24h in Kotlin
             val alerts = assessments.documents.mapNotNull { doc ->
                 val ts = doc.getLong("timestamp") ?: 0L
                 if (ts < twentyFourHoursAgo) return@mapNotNull null
@@ -1286,23 +1753,23 @@ fun loadAlertsFromFirebase(
 
                 RiskAlert(
                     id = doc.id,
-                    url = "⚠️ Content blocked - View on child's device for details",
+                    url = "⚠️ Content blocked",
                     riskLevel = riskLevel,
                     blockReasons = listOf(
                         when (riskLevel) {
-                            "CRITICAL" -> "Immediate attention recommended"
-                            "HIGH" -> "Parental review suggested"
+                            "CRITICAL" -> "Immediate attention recommended - grooming detected"
+                            "HIGH" -> "Parental review suggested - suspicious pattern"
                             else -> "Monitor conversation"
                         }
                     ),
                     confidenceScore = (doc.getDouble("confidenceScore") ?: 0.7).toFloat(),
-                    timestamp = doc.getLong("timestamp") ?: System.currentTimeMillis()
+                    timestamp = doc.getLong("timestamp") ?: System.currentTimeMillis(),
+                    messageText = doc.getString("messageText") ?: doc.getString("url") ?: ""  // 🆕 Read message
                 )
             }
 
             onResult(alerts)
         } catch (e: Exception) {
-            // Fallback to local storage if needed
             loadAlertsFromLocalStorage(context, onResult)
         }
     }
@@ -1545,6 +2012,14 @@ fun SimpleBarChart(data: List<SentimentData>) {
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun StatChip(label: String, color: Color) {
+    Surface(shape = RoundedCornerShape(50), color = color.copy(alpha = 0.12f)) {
+        Text(label, color = color, fontSize = 11.sp, fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
     }
 }
 

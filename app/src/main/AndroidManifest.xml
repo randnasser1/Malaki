@@ -88,7 +88,13 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
-
+        <service
+            android:name=".MyFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
         <!-- ========== ADD FIREBASE MESSAGING SERVICE ========== -->
         <service
             android:name=".MyFirebaseMessagingService"

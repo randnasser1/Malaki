@@ -133,57 +133,121 @@ class MessageAccessibilityService : AccessibilityService() {
     }
 
     private fun saveMessage(packageName: String, text: String) {
-        try {
-            if (text.isBlank()) return
+    try {
+        if (text.isBlank()) return
 
-            var cleanText = text
-                .replace(Regex("\\[\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}\\]"), "")
-                .replace(Regex("\\[com\\.[a-z]+\\.[a-z]+\\]"), "")
-                .trim()
+        var cleanText = text
+            .replace(Regex("\\[\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}\\]"), "")
+            .replace(Regex("\\[com\\.[a-z]+\\.[a-z]+\\]"), "")
+            .trim()
 
-            if (cleanText.isEmpty() || cleanText.length < 5) return
+        if (cleanText.isEmpty() || cleanText.length < 5) return
 
-            val messageHash = "${packageName}|${cleanText.hashCode()}"
+        val lowerText = cleanText.lowercase(Locale.getDefault())
 
-            // Session dedup
-            if (seenMessages.contains(messageHash)) return
-            seenMessages.add(messageHash)
-
-            // Persistent dedup (SharedPreferences)
-            val prefs = applicationContext.getSharedPreferences("sent_messages", Context.MODE_PRIVATE)
-            val sentHashes = prefs.getStringSet("sent_hashes", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
-
-            if (sentHashes.contains(messageHash)) return
-
-            sentHashes.add(messageHash)
-            prefs.edit().putStringSet("sent_hashes", sentHashes).apply()
-
-            // Save to Room only — BackgroundService syncs to backend every 60s.
-            // Do NOT call syncPendingEvents() here: this runs on the main thread
-            // (accessibility callback), which throws NetworkOnMainThreadException.
-            runBlocking {
-                val repository = EventRepository(applicationContext)
-                repository.ensureDeviceProfile()
-                repository.captureEvent(
-                    eventType = "MESSAGE",
-                    sourceApp = packageName,
-                    senderRole = "OTHER",
-                    rawText = cleanText,
-                    textPreview = cleanText.take(100),
-                    timestampUtc = System.currentTimeMillis()
-                )
-                Log.d(TAG, "✅ Sent to Room: ${cleanText.take(50)}")
+        // Comprehensive list of UI phrases to filter out
+        val uiPhrases = listOf(
+            // Instagram specific
+            "turn on blend", "add more actions", "suggested for you", "posted a photo",
+            "add to story", "reels tray container", "double tap to like", "liked by",
+            "view all comments", "add a comment", "send message", "type a message",
+            "replied to", "mentioned you", "shared a post", "liked your",
+            
+            // Instagram stories/follow suggestions
+            "follow", "following", "suggested", "explore", "discover", "trending",
+            "for you", "because you watched", "popular", "related",
+            
+            // Generic social media UI
+            "profile picture", "typing...", "typing", "seen", "delivered", "read",
+            "online", "offline", "active now", "last active", "voice message",
+            "press and hold to record", "swipe up", "disappearing messages",
+            "you turned off", "you turned on", "no internet", "connecting",
+            "loading...", "loading", "refresh", "retry", "try again",
+            
+            // Media controls
+            "play", "pause", "skip", "next", "previous", "mute", "unmute",
+            "full screen", "exit full screen", "download", "share", "copy link",
+            
+            // Time/date patterns
+            Regex("\\d{1,2}:\\d{2}\\s*(AM|PM)?"),
+            Regex("\\d{1,2}/\\d{1,2}/\\d{2,4}"),
+            Regex("\\d{1,2}\\s+(min|hour|day|week|month).*ago"),
+            
+            // Emoji-only messages
+            Regex("^[😀-🙏\\s]+$")
+        )
+        
+        // Skip if message matches any UI pattern
+        var shouldSkip = false
+        for (pattern in uiPhrases) {
+            when (pattern) {
+                is Regex -> {
+                    if (pattern.containsMatchIn(lowerText)) {
+                        shouldSkip = true
+                        break
+                    }
+                }
+                is String -> {
+                    if (lowerText.contains(pattern)) {
+                        shouldSkip = true
+                        break
+                    }
+                }
             }
-
-            // ❌ DO NOT write to messages.txt anymore!
-            // val file = File(filesDir, "messages.txt")
-            // file.appendText(...)
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error: ${e.message}")
         }
-    }
+        
+        if (shouldSkip) {
+            Log.d(TAG, "⏭️ Skipping UI text: $cleanText")
+            return
+        }
+        
+        // Skip very short messages with no real content
+        val wordCount = cleanText.split(Regex("\\s+")).size
+        if (wordCount < 2 && cleanText.length < 10) {
+            Log.d(TAG, "⏭️ Skipping too short: $cleanText")
+            return
+        }
 
+        // Create hash and save...
+        val messageHash = "${packageName}|${cleanText.hashCode()}"
+        
+        // Session dedup
+        if (seenMessages.contains(messageHash)) return
+        seenMessages.add(messageHash)
+
+        // Persistent dedup
+        val prefs = applicationContext.getSharedPreferences("sent_messages", Context.MODE_PRIVATE)
+        val sentHashes = prefs.getStringSet("sent_hashes", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
+
+        if (sentHashes.contains(messageHash)) return
+
+        sentHashes.add(messageHash)
+        prefs.edit().putStringSet("sent_hashes", sentHashes).apply()
+
+        if (sentHashes.size > 1000) {
+            val limited = sentHashes.take(500).toMutableSet()
+            prefs.edit().putStringSet("sent_hashes", limited).apply()
+        }
+
+        // Save to Room
+        runBlocking {
+            val repository = EventRepository(applicationContext)
+            repository.ensureDeviceProfile()
+            repository.captureEvent(
+                eventType = "MESSAGE",
+                sourceApp = packageName,
+                senderRole = "OTHER",
+                rawText = cleanText,
+                textPreview = cleanText.take(100),
+                timestampUtc = System.currentTimeMillis()
+            )
+            Log.d(TAG, "✅ Saved message: ${cleanText.take(50)}")
+        }
+
+    } catch (e: Exception) {
+        Log.e(TAG, "Error saving message: ${e.message}")
+    }
+}
     override fun onInterrupt() {
         Log.d(TAG, "❌ Service interrupted")
     }
@@ -302,24 +366,34 @@ class MessageAccessibilityService : AccessibilityService() {
     private fun isLikelyMessage(text: String): Boolean {
         val lowerText = text.lowercase(Locale.getDefault())
 
+        // Skip very short text
         if (text.length < 5) return false
+
+        // Skip timestamps
         if (text.matches(Regex("\\d{1,2}:\\d{2}(\\s?(AM|PM))?"))) return false
 
-        val uiElements = listOf(
-            "send", "type a message", "message", "chat", "back", "menu",
-            "settings", "search", "call", "video", "attach", "emoji",
-            "gif", "sticker", "mic", "camera", "gallery", "send message"
+        // 🆕 Skip Instagram/WhatsApp UI elements
+        val uiPhrases = listOf(
+            "profile picture", "double tap to like", "liked by", "view all comments",
+            "add a comment", "send message", "type a message", "typing",
+            "seen", "delivered", "read", "online", "offline",
+            "instagram", "whatsapp", "messenger", "discord",
+            "replied to", "mentioned you", "shared a post",
+            "voice message", "press and hold", "swipe up",
+            "disappearing messages", "you turned off", "you turned on",
+            "no internet", "connecting", "loading", "refresh"
         )
 
-        if (uiElements.any { lowerText == it || lowerText.startsWith("$it ") || lowerText.endsWith(" $it") }) {
+        if (uiPhrases.any { lowerText.contains(it) }) {
+            Log.d(TAG, "⏭️ Skipping UI text: $text")
             return false
         }
 
-        return text.contains(Regex("[😀-🙏]")) ||
-                text.contains(Regex("https?://")) ||
-                text.contains(Regex("[.!?]\\s+\\w")) ||
-                text.length > 20 ||
-                text.split(" ").size > 3
+        // Skip if it's just emojis or very short with no words
+        val wordCount = text.split(" ").size
+        if (wordCount < 2 && !text.contains(Regex("[😀-🙏]"))) return false
+
+        return true
     }
 
     private fun isSystemText(text: String): Boolean {

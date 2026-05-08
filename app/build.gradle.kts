@@ -121,6 +121,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.0.21")
     implementation("com.google.firebase:firebase-appcheck-debug:17.0.0")
+    implementation("com.google.firebase:firebase-messaging:24.0.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

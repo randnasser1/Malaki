@@ -16,7 +16,7 @@ class BackgroundService : Service() {
     companion object {
         private const val TAG = "BackgroundService"
         private const val COLLECTION_INTERVAL_MINUTES = 2L  // Every 2 minutes (real-time)
-        private const val SYNC_INTERVAL_MINUTES = 1L        // Every 1 minute for ML
+        private const val SYNC_INTERVAL_SECONDS = 60L       // Every 60 seconds for ML
     }
 
     private val dataExecutor = Executors.newSingleThreadScheduledExecutor()
@@ -35,10 +35,10 @@ class BackgroundService : Service() {
             collectAllData()
         }, 0, COLLECTION_INTERVAL_MINUTES, TimeUnit.MINUTES)
 
-        // Schedule BACKEND SYNC every 1 minute (for ML analysis)
+        // Schedule BACKEND SYNC every 60 seconds for ML analysis
         syncExecutor.scheduleAtFixedRate({
             syncWithBackend()
-        }, 30, SYNC_INTERVAL_MINUTES, TimeUnit.SECONDS)  // First sync after 30 sec
+        }, 30, SYNC_INTERVAL_SECONDS, TimeUnit.SECONDS)  // First sync after 30 sec
 
         return START_STICKY
     }
@@ -71,44 +71,24 @@ class BackgroundService : Service() {
     }
 
     private fun syncWithBackend() {
-        Log.d(TAG, "🔄 Syncing with backend ML pipeline...")
-
         GlobalScope.launch {
-            try {
-                val syncManager = BackendSyncManager(this@BackgroundService)
-                syncManager.syncPendingEvents()  // Send unanalyzed events to backend
-                Log.d(TAG, "✅ Backend sync completed")
-            } catch (e: Exception) {
-                Log.w(TAG, "⚠️ Backend sync failed: ${e.message}")
-            }
+            val ok = BackendSyncManager(this@BackgroundService).syncPendingEvents()
+            if (ok) Log.d(TAG, "✅ Backend sync completed")
+            // failures already logged inside syncPendingEvents
         }
     }
 
     private fun analyzeCollectedUrls() {
+        // messages.txt is no longer written (AccessibilityService sends directly to Room).
+        // Delete any stale file left over from older builds so it stops being re-read.
         try {
             val messagesFile = File(filesDir, "messages.txt")
-            if (!messagesFile.exists()) {
-                return
-            }
-
-            val lines = messagesFile.readLines()
-            val urlRegex = Regex("https?://[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=]+")
-
-            val dataCollector = DataCollector(this)
-            val analyzedUrls = mutableSetOf<String>()  // Track to avoid duplicates
-
-            lines.forEach { line ->
-                urlRegex.findAll(line).forEach { match ->
-                    val url = match.value
-                    if (!analyzedUrls.contains(url)) {
-                        analyzedUrls.add(url)
-                        Log.d(TAG, "🌐 Found new URL to analyze: ${url.take(50)}...")
-                        dataCollector.analyzeUrlAndSave(url)  // Instant analysis
-                    }
-                }
+            if (messagesFile.exists()) {
+                messagesFile.delete()
+                Log.d(TAG, "🧹 Deleted stale messages.txt")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error analyzing URLs: ${e.message}")
+            Log.e(TAG, "Error deleting messages.txt: ${e.message}")
         }
     }
 

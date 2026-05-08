@@ -5,6 +5,8 @@ import android.util.Log
 import com.example.malaki.BuildConfig
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -59,14 +61,31 @@ class BackendSyncManager(context: Context) {
     private val gson = Gson()
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)   // ML inference on 5 events needs headroom
         .build()
     private val json = "application/json".toMediaType()
-    suspend fun syncPendingEvents() {
-        val unsyncedEvents = repository.getUnsyncedEvents(limit = 20)
-        if (unsyncedEvents.isEmpty()) return
 
-        val payloads = unsyncedEvents.map { e ->
+    /** Returns true if at least one event was successfully synced. */
+    suspend fun syncPendingEvents(): Boolean {
+        Log.d(TAG, "🔵 syncPendingEvents CALLED")
+
+        val unsyncedEvents = repository.getUnsyncedEvents(limit = 5)
+        Log.d(TAG, "🔵 Found ${unsyncedEvents.size} unsynced events")
+
+        if (unsyncedEvents.isEmpty()) return true
+
+        // Only sync events from the last 6 hours.
+        // Stale events that timed out before (yesterday, etc.) can never be acked because
+        // Android never received the response — they'll be purged by purgeOldEvents().
+        val recentCutoff = System.currentTimeMillis() - 6 * 60 * 60 * 1000L
+        val recentEvents = unsyncedEvents.filter { it.timestampUtc >= recentCutoff }
+
+        if (recentEvents.isEmpty()) {
+            Log.d(TAG, "🔵 No recent events to sync (${unsyncedEvents.size} old stale events ignored)")
+            return true
+        }
+
+        val payloads = recentEvents.map { e ->
             EventPayload(
                 eventId = e.eventId,
                 deviceId = e.deviceId,
@@ -78,55 +97,62 @@ class BackendSyncManager(context: Context) {
             )
         }
 
-        val body = gson.toJson(EventBatchRequest(payloads))
-            .toRequestBody(json)
-
+        val body = gson.toJson(EventBatchRequest(payloads)).toRequestBody(json)
         val request = Request.Builder()
             .url("$BACKEND_BASE_URL/events/analyze")
             .post(body)
             .build()
 
-        try {
-            http.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.w(TAG, "Backend returned ${response.code} for batch sync")
-                    return
+        return try {
+            withContext(Dispatchers.IO) {
+                http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        Log.w(TAG, "❌ Backend returned ${response.code}")
+                        return@withContext false
+                    }
+                    val raw = response.body?.string() ?: run {
+                        Log.w(TAG, "❌ Empty response body")
+                        return@withContext false
+                    }
+                    val batchResponse = gson.fromJson(raw, EventBatchResponse::class.java)
+                    for (result in batchResponse.results) {
+                        repository.saveAnalysisResults(
+                            eventId = result.eventId,
+                            groomingProb = result.groomingProb,
+                            stageLabel = result.stageLabel,
+                            sentimentScore = result.sentimentScore,
+                            emotionVectorJson = gson.toJson(result.emotionVector),
+                            anomalyScore = result.anomalyScore,
+                            finalRiskScore = result.finalRiskScore,
+                            riskLevel = result.riskLevel,
+                            thresholdUsed = result.thresholdUsed,
+                            modelVersion = result.modelVersion,
+                            isAlertTriggered = result.isAlertTriggered,
+                            topTokensJson = gson.toJson(result.topTokens),
+                            humanReason = result.humanReason
+                        )
+                    }
+                    Log.i(TAG, "✅ Synced ${batchResponse.results.size}/${recentEvents.size} events")
+                    true
                 }
-                val raw = response.body?.string() ?: return
-                val batchResponse = gson.fromJson(raw, EventBatchResponse::class.java)
-
-                for (result in batchResponse.results) {
-                    repository.saveAnalysisResults(
-                        eventId = result.eventId,
-                        groomingProb = result.groomingProb,
-                        stageLabel = result.stageLabel,
-                        sentimentScore = result.sentimentScore,
-                        emotionVectorJson = gson.toJson(result.emotionVector),
-                        anomalyScore = result.anomalyScore,
-                        finalRiskScore = result.finalRiskScore,
-                        riskLevel = result.riskLevel,
-                        thresholdUsed = result.thresholdUsed,
-                        modelVersion = result.modelVersion,
-                        isAlertTriggered = result.isAlertTriggered,
-                        topTokensJson = gson.toJson(result.topTokens),
-                        humanReason = result.humanReason
-                    )
-                }
-                Log.i(TAG, "Synced ${batchResponse.results.size} events")
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Backend sync failed: ${e.message}")
+            Log.w(TAG, "❌ Backend sync failed [${e::class.simpleName}]: ${e.message}")
+            false
         }
     }
 
-    fun isBackendReachable(): Boolean {
+    suspend fun isBackendReachable(): Boolean {
         return try {
-            val req = Request.Builder().url("$BACKEND_BASE_URL/health").get().build()
-            http.newCall(req).execute().use { it.isSuccessful }
+            withContext(Dispatchers.IO) {
+                val req = Request.Builder().url("$BACKEND_BASE_URL/health").get().build()
+                http.newCall(req).execute().use { it.isSuccessful }
+            }
         } catch (e: Exception) {
             false
         }
     }
+
     suspend fun syncSingleEvent(eventId: String, text: String) {
         try {
             val payload = EventPayload(
@@ -150,16 +176,17 @@ class BackendSyncManager(context: Context) {
                 .post(body)
                 .build()
 
-            http.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    Log.d(TAG, "✅ Real-time sync successful for $eventId")
-                } else {
-                    Log.w(TAG, "Real-time sync returned ${response.code}")
+            withContext(Dispatchers.IO) {
+                http.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        Log.d(TAG, "✅ Real-time sync successful for $eventId")
+                    } else {
+                        Log.w(TAG, "❌ Real-time sync returned ${response.code}")
+                    }
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Real-time sync failed: ${e.message}")
+            Log.w(TAG, "❌ Real-time sync failed [${e::class.simpleName}]: ${e.message}")
         }
     }
 }
-

@@ -2,17 +2,19 @@ package com.example.malaki.db
 
 import android.content.Context
 import android.provider.Settings
+import com.google.firebase.auth.FirebaseAuth
 import java.util.UUID
 
-class EventRepository(context: Context) {
+class EventRepository(private val context: Context) {
 
     private val dao = MalakiDatabase.getInstance(context).appDao()
 
-    // Stable device ID derived from Android's unique hardware identifier
-    val deviceId: String = Settings.Secure.getString(
-        context.contentResolver,
-        Settings.Secure.ANDROID_ID
-    ) ?: UUID.randomUUID().toString()
+    // Use Firebase Auth UID so childId matches every other Firestore write.
+    // Falls back to ANDROID_ID (then random UUID) when no user is signed in.
+    val deviceId: String
+        get() = FirebaseAuth.getInstance().currentUser?.uid
+            ?: Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+            ?: UUID.randomUUID().toString()
 
     suspend fun ensureDeviceProfile(appVersion: String = "1.0", modelVersion: String = "1.0") {
         if (dao.getDeviceProfile(deviceId) == null) {

@@ -4,7 +4,8 @@
       "Bash(python -c ' *)",
       "Bash(xargs grep *)",
       "Bash(ipconfig)",
-      "Bash(pip install *)"
+      "Bash(pip install *)",
+      "Bash(python -c \"from app.music_service import MusicService; print\\('import ok'\\)\")"
     ]
   }
 }

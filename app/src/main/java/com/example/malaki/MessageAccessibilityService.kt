@@ -2,33 +2,32 @@ package com.example.malaki
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
-import android.os.Handler
-import android.os.Looper
+import android.content.Context
+import android.content.Intent
+import android.content.SharedPreferences
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.example.malaki.db.BackendSyncManager
+import com.example.malaki.db.EventRepository
+import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
-import com.example.malaki.db.EventRepository
-import kotlinx.coroutines.runBlocking
+import kotlin.collections.component1
+import kotlin.collections.component2
+import kotlin.collections.set
+
 class MessageAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "MESSAGE_SERVICE"
-        // Thread-safe set to track seen messages
         private val seenMessages = Collections.synchronizedSet(mutableSetOf<String>())
-
-        // Rate limiting - prevent excessive processing
         private var lastProcessTime = 0L
-        private const val MIN_PROCESS_INTERVAL = 500L // milliseconds
-
-        // Track recently processed package names
-        private val recentPackages = Collections.synchronizedSet(mutableSetOf<String>())
-        private val cleanupHandler = Handler(Looper.getMainLooper())
-        // Track last captured URL to avoid duplicates
+        private const val MIN_PROCESS_INTERVAL = 500L
         private var lastCapturedUrl: String? = null
     }
+
     private val messagingApps = listOf(
         "com.google.android.apps.messaging",
         "com.android.mms",
@@ -40,7 +39,6 @@ class MessageAccessibilityService : AccessibilityService() {
         "com.discord"
     )
 
-    // Browser apps list
     private val browserApps = listOf(
         "com.android.chrome",
         "com.google.android.apps.chrome",
@@ -49,28 +47,33 @@ class MessageAccessibilityService : AccessibilityService() {
         "com.opera.browser",
         "com.microsoft.emmx"
     )
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         Log.d(TAG, "✅ Message Service CONNECTED!")
 
-        // Schedule periodic cleanup of recentPackages
-        cleanupHandler.postDelayed(object : Runnable {
-            override fun run() {
-                recentPackages.clear()
-                cleanupHandler.postDelayed(this, 5000) // Clear every 5 seconds
-            }
-        }, 5000)
+        // Clear in-memory dedup on reconnect
+        seenMessages.clear()
 
-        // Configure service with optimized settings
+        // Prune SharedPreferences hashes once per day so a reinstall doesn't re-replay history
+        val prefs = applicationContext.getSharedPreferences("sent_messages", Context.MODE_PRIVATE)
+        val lastPrune = prefs.getLong("last_hash_prune", 0L)
+        if (System.currentTimeMillis() - lastPrune > 24 * 60 * 60 * 1000L) {
+            prefs.edit()
+                .putStringSet("sent_hashes", mutableSetOf())
+                .putLong("last_hash_prune", System.currentTimeMillis())
+                .apply()
+            Log.d(TAG, "🧹 Pruned sent_hashes (24h rotation)")
+        }
+
         val info = AccessibilityServiceInfo()
-        // Remove TYPE_WINDOW_CONTENT_CHANGED as it fires too frequently
-        info.eventTypes = AccessibilityEvent.TYPE_VIEW_CLICKED or
-                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
-        // TYPE_WINDOW_CONTENT_CHANGED removed!
+        // TYPE_WINDOW_STATE_CHANGED  → browser page navigation (URL bar updates)
+        // TYPE_WINDOW_CONTENT_CHANGED → new message arrived in open conversation (live only)
+        info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
 
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-        info.notificationTimeout = 500 // Increased from 100 to 500
+        info.notificationTimeout = 100
         info.flags = AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
 
         serviceInfo = info
@@ -79,68 +82,119 @@ class MessageAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         val packageName = event.packageName?.toString() ?: return
 
-        // Rate limiting - don't process too frequently
-        val currentTime = System.currentTimeMillis()
-        if (currentTime - lastProcessTime < MIN_PROCESS_INTERVAL) {
-            return
-        }
-        lastProcessTime = currentTime
-
-        // Skip if we've recently processed this package
-        if (recentPackages.contains(packageName)) {
-            return
-        }
-        recentPackages.add(packageName)
-
-
-        // Check if this is a browser or messaging app
         val isBrowser = browserApps.any { packageName.contains(it, ignoreCase = true) }
         val isMessaging = messagingApps.any { packageName.contains(it, ignoreCase = true) } ||
                 packageName.contains("messaging")
 
-        if (!isMessaging && !isBrowser) {
+        if (!isMessaging && !isBrowser) return
+
+        // ── Browser: capture URL only when the user navigates to a new page ────
+        if (isBrowser && event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val rootNode = rootInActiveWindow ?: return
+            try {
+                val url = captureBrowserUrl(rootNode, packageName)
+                url?.takeIf { it.isNotBlank() && it != lastCapturedUrl && it.startsWith("http") }
+                    ?.let {
+                        lastCapturedUrl = it
+                        Log.d(TAG, "🌐 Browser URL: $it")
+                        saveBrowserUrl(packageName, it)
+                        extractAndAnalyzeUrls(it)
+                    }
+            } finally {
+                rootNode.recycle()
+            }
             return
         }
-        // Skip non-messaging apps to reduce noise
-        if (!messagingApps.contains(packageName) && !packageName.contains("messaging")) {
-            return
-        }
 
-        Log.d(TAG, "📱 Processing: $packageName - ${getEventTypeString(event.eventType)}")
+        // ── Messaging: only react to CONTENT_CHANGED (new message arrived) ──────
+        // WINDOW_STATE_CHANGED fires when the app *opens* → would scan conversation history.
+        // WINDOW_CONTENT_CHANGED fires when the conversation view gets new content (live).
+        if (isMessaging && event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            val currentTime = System.currentTimeMillis()
+            if (currentTime - lastProcessTime < MIN_PROCESS_INTERVAL) return
+            lastProcessTime = currentTime
 
-        // Get the root node of the current window
-        val rootNode = rootInActiveWindow
-        if (isMessaging) {
-            val messages = extractMessages(rootNode, packageName)
-            messages.forEach { message ->
-                if (message.isNotBlank() && !isSystemText(message)) {
-                    saveMessage(packageName, message)
-                    extractAndAnalyzeUrls(message)
+            // Prefer event.source (only the subtree that changed = new message node)
+            // Fall back to rootInActiveWindow only if source is unavailable.
+            val scanNode = event.source ?: rootInActiveWindow ?: return
+            try {
+                Log.d(TAG, "💬 Content changed in $packageName — scanning for new messages")
+                val messages = extractMessages(scanNode, packageName)
+                messages.forEach { message ->
+                    if (message.isNotBlank() && !isSystemText(message)) {
+                        saveMessage(packageName, message)
+                        extractAndAnalyzeUrls(message)
+                    }
                 }
+            } finally {
+                scanNode.recycle()
             }
         }
-
-        if (isBrowser) {
-            val browserUrl = captureBrowserUrl(rootNode, packageName)
-            browserUrl?.let { url ->
-                if (url.isNotBlank() && url != lastCapturedUrl && url.startsWith("http")) {
-                    lastCapturedUrl = url
-                    Log.d(TAG, "🌐 Browser URL detected: $url")
-                    saveBrowserUrl(packageName, url)
-                    extractAndAnalyzeUrls(url)
-                }
-            }
-        }
-
-        rootNode.recycle()
     }
 
+    private fun saveMessage(packageName: String, text: String) {
+        try {
+            if (text.isBlank()) return
 
-    // Capture URL from browser address bar
+            var cleanText = text
+                .replace(Regex("\\[\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}\\]"), "")
+                .replace(Regex("\\[com\\.[a-z]+\\.[a-z]+\\]"), "")
+                .trim()
+
+            if (cleanText.isEmpty() || cleanText.length < 5) return
+
+            val messageHash = "${packageName}|${cleanText.hashCode()}"
+
+            // Session dedup
+            if (seenMessages.contains(messageHash)) return
+            seenMessages.add(messageHash)
+
+            // Persistent dedup (SharedPreferences)
+            val prefs = applicationContext.getSharedPreferences("sent_messages", Context.MODE_PRIVATE)
+            val sentHashes = prefs.getStringSet("sent_hashes", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
+
+            if (sentHashes.contains(messageHash)) return
+
+            sentHashes.add(messageHash)
+            prefs.edit().putStringSet("sent_hashes", sentHashes).apply()
+
+            // Save to Room only — BackgroundService syncs to backend every 60s.
+            // Do NOT call syncPendingEvents() here: this runs on the main thread
+            // (accessibility callback), which throws NetworkOnMainThreadException.
+            runBlocking {
+                val repository = EventRepository(applicationContext)
+                repository.ensureDeviceProfile()
+                repository.captureEvent(
+                    eventType = "MESSAGE",
+                    sourceApp = packageName,
+                    senderRole = "OTHER",
+                    rawText = cleanText,
+                    textPreview = cleanText.take(100),
+                    timestampUtc = System.currentTimeMillis()
+                )
+                Log.d(TAG, "✅ Sent to Room: ${cleanText.take(50)}")
+            }
+
+            // ❌ DO NOT write to messages.txt anymore!
+            // val file = File(filesDir, "messages.txt")
+            // file.appendText(...)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error: ${e.message}")
+        }
+    }
+
+    override fun onInterrupt() {
+        Log.d(TAG, "❌ Service interrupted")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+    }
+
     private fun captureBrowserUrl(rootNode: AccessibilityNodeInfo, packageName: String): String? {
         var capturedUrl: String? = null
 
-        // Method 1: Find by view ID (Chrome's address bar)
         val chromeAddressBarId = "com.android.chrome:id/url_bar"
         val nodes = rootNode.findAccessibilityNodeInfosByViewId(chromeAddressBarId)
 
@@ -152,7 +206,6 @@ class MessageAccessibilityService : AccessibilityService() {
             urlNode.recycle()
         }
 
-        // Method 2: Search for text containing "http" in editable fields
         if (capturedUrl == null) {
             val httpNodes = rootNode.findAccessibilityNodeInfosByText("http")
             for (node in httpNodes) {
@@ -170,14 +223,11 @@ class MessageAccessibilityService : AccessibilityService() {
         return capturedUrl
     }
 
-    // Extract URLs from text and send for analysis
     private fun extractAndAnalyzeUrls(text: String) {
         val urlRegex = Regex("https?://[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=]+")
         urlRegex.findAll(text).forEach { match ->
             val url = match.value
             Log.d(TAG, "🔍 Found URL to analyze: $url")
-
-            // Use DataCollector to analyze the URL
             try {
                 val dataCollector = DataCollector(applicationContext)
                 dataCollector.analyzeUrlAndSave(url)
@@ -187,43 +237,35 @@ class MessageAccessibilityService : AccessibilityService() {
         }
     }
 
-    // Save browser URL to separate file
     private fun saveBrowserUrl(packageName: String, url: String) {
         try {
-            val timestamp =
-                SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+            val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
             val logEntry = "[$timestamp] [$packageName] [BROWSER] $url\n"
-
             val file = File(filesDir, "browser_history.txt")
             file.appendText(logEntry)
-
             Log.d(TAG, "💾 Saved browser URL: ${url.take(50)}")
         } catch (e: Exception) {
             Log.e(TAG, "Error saving browser URL: ${e.message}")
         }
     }
-    // Extract only text that looks like actual messages
+
     private fun extractMessages(node: AccessibilityNodeInfo, packageName: String): List<String> {
         val messageList = mutableListOf<String>()
 
-        // Check node text
         node.text?.toString()?.let { text ->
             if (isLikelyMessage(text)) {
                 messageList.add(text)
             }
         }
 
-        // Check content description (used by some apps)
         node.contentDescription?.toString()?.let { text ->
             if (isLikelyMessage(text)) {
                 messageList.add(text)
             }
         }
 
-        // Check for message-specific patterns in package
         when {
             packageName.contains("whatsapp") -> {
-                // WhatsApp specific patterns
                 node.viewIdResourceName?.let { id ->
                     if (id.contains("message") || id.contains("conversation")) {
                         node.text?.toString()?.let { messageList.add(it) }
@@ -231,7 +273,6 @@ class MessageAccessibilityService : AccessibilityService() {
                 }
             }
             packageName.contains("instagram") -> {
-                // Instagram DM patterns
                 node.viewIdResourceName?.let { id ->
                     if (id.contains("direct") || id.contains("message")) {
                         node.text?.toString()?.let { messageList.add(it) }
@@ -239,7 +280,6 @@ class MessageAccessibilityService : AccessibilityService() {
                 }
             }
             packageName.contains("messaging") || packageName.contains("mms") -> {
-                // Google Messages patterns
                 node.viewIdResourceName?.let { id ->
                     if (id.contains("message") || id.contains("conversation") || id.contains("snippet")) {
                         node.text?.toString()?.let { messageList.add(it) }
@@ -248,7 +288,6 @@ class MessageAccessibilityService : AccessibilityService() {
             }
         }
 
-        // Recursively check children
         for (i in 0 until node.childCount) {
             val child = node.getChild(i)
             if (child != null) {
@@ -257,20 +296,15 @@ class MessageAccessibilityService : AccessibilityService() {
             }
         }
 
-        return messageList.distinct() // Remove duplicates from same extraction
+        return messageList.distinct()
     }
 
-    // Determine if text is likely an actual message vs UI element
     private fun isLikelyMessage(text: String): Boolean {
         val lowerText = text.lowercase(Locale.getDefault())
 
-        // Skip empty or very short text (likely UI buttons)
         if (text.length < 5) return false
-
-        // Skip if it's a timestamp
         if (text.matches(Regex("\\d{1,2}:\\d{2}(\\s?(AM|PM))?"))) return false
 
-        // Skip common UI elements
         val uiElements = listOf(
             "send", "type a message", "message", "chat", "back", "menu",
             "settings", "search", "call", "video", "attach", "emoji",
@@ -281,15 +315,13 @@ class MessageAccessibilityService : AccessibilityService() {
             return false
         }
 
-        // Message indicators - longer text, contains emoji, multiple words, punctuation
-        return text.contains(Regex("[😀-🙏]")) || // Has emoji
-                text.contains(Regex("https?://")) || // Has URL
-                text.contains(Regex("[.!?]\\s+\\w")) || // Multiple sentences
-                text.length > 20 || // Longer text
-                text.split(" ").size > 3 // Multiple words
+        return text.contains(Regex("[😀-🙏]")) ||
+                text.contains(Regex("https?://")) ||
+                text.contains(Regex("[.!?]\\s+\\w")) ||
+                text.length > 20 ||
+                text.split(" ").size > 3
     }
 
-    // Filter out system/UI text (buttons, labels, etc.)
     private fun isSystemText(text: String): Boolean {
         val systemWords = listOf(
             "back", "send", "home", "menu", "settings", "ok", "cancel", "submit",
@@ -303,56 +335,7 @@ class MessageAccessibilityService : AccessibilityService() {
         return systemWords.any { lowerText.contains(it) } ||
                 text.length < 3 ||
                 text.all { it.isWhitespace() || it == '.' || it == ',' } ||
-                text.matches(Regex("\\d+")) // Just numbers (likely a count or timestamp)
-    }
-
-    private fun saveMessage(packageName: String, text: String) {
-        try {
-            if (text.isBlank()) return
-
-            // Create unique identifier
-            val messageId = "$packageName|${text.length}|${text.hashCode()}"
-
-            // Check if already seen
-            if (seenMessages.contains(messageId)) {
-                Log.d(TAG, "⏭️ Skipping duplicate message")
-                return
-            }
-
-            seenMessages.add(messageId)
-
-            // Limit cache size
-            if (seenMessages.size > 500) {
-                val iterator = seenMessages.iterator()
-                repeat(250) { if (iterator.hasNext()) iterator.remove() }
-            }
-
-            val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-            val logEntry = "[$timestamp] [$packageName] $text\n"
-
-            // Save to file
-            val file = File(filesDir, "messages.txt")
-            file.appendText(logEntry)
-
-            // Save to Room for ML
-            runBlocking {
-                val repository = EventRepository(applicationContext)
-                repository.ensureDeviceProfile()
-                repository.captureEvent(
-                    eventType = "MESSAGE",
-                    sourceApp = packageName,
-                    senderRole = "OTHER",
-                    rawText = text,
-                    textPreview = text.take(100),
-                    timestampUtc = System.currentTimeMillis()
-                )
-            }
-
-            Log.d(TAG, "💾 Saved message (${text.take(50)})")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error saving message: ${e.message}")
-        }
+                text.matches(Regex("\\d+"))
     }
 
     private fun getEventTypeString(eventType: Int): String {
@@ -365,14 +348,5 @@ class MessageAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> "NOTIFY"
             else -> "UNKNOWN($eventType)"
         }
-    }
-
-    override fun onInterrupt() {
-        Log.d(TAG, "❌ Service interrupted")
-    }
-
-    override fun onDestroy() {
-        cleanupHandler.removeCallbacksAndMessages(null)
-        super.onDestroy()
     }
 }

@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.Query
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -27,13 +28,25 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import android.util.Log
 import com.example.malaki.BuildConfig
-
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.draw.clip
+import java.util.Date
+import java.util.Locale
 // Data classes
 data class SentimentData(val day: String, val score: Int)
 data class WellbeingData(val category: String, val score: Int)
 data class SafetyIndicator(val type: String, val status: String, val description: String)
 data class ChildInfo(val id: String, val name: String)
-
+data class AppUsageItem(val name: String, val timeMin: Long)
+// Add this near your other data classes (around line 30-40)
+data class EmotionDayData(
+    val date: String,
+    val childLoggedEmotion: String?,
+    val inferredEmotion: String?,
+    val hasChildLog: Boolean,
+    val hasInferredData: Boolean
+)
 @Composable
 fun ParentDashboard(
     onNavigate: (String) -> Unit,
@@ -44,7 +57,7 @@ fun ParentDashboard(
     var safetyIndicators by remember { mutableStateOf<List<SafetyIndicator>>(emptyList()) }
     var musicInsights by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var appUsage by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
-    var topAppsList by remember { mutableStateOf<List<String>>(emptyList()) }
+    var topAppsList by remember { mutableStateOf<List<AppUsageItem>>(emptyList()) }
     var alerts by remember { mutableStateOf<List<RiskAlert>>(emptyList()) }
     var isLoadingAlerts by remember { mutableStateOf(true) }
     var isLoadingDashboard by remember { mutableStateOf(true) }
@@ -297,65 +310,350 @@ fun ParentDashboard(
                     }
                 }
             } else {
-                // Sentiment Trends Card
+                // Interactive Emotion Calendar Card
                 item {
+                    var emotionData by remember { mutableStateOf<List<EmotionDayData>>(emptyList()) }
+                    var selectedDate by remember { mutableStateOf<String?>(null) }
+                    var selectedEmotion by remember { mutableStateOf<String?>(null) }
+                    var selectedSource by remember { mutableStateOf<String?>(null) }
+
+                    LaunchedEffect(selectedChildId) {
+                        if (selectedChildId != null && selectedChildId!!.isNotEmpty()) {
+                            try {
+                                val firestore = FirebaseFirestore.getInstance()
+
+                                // 1. Get WELLBEING SUMMARY (child-logged moods)
+                                val wellbeingDocs = firestore.collection("wellbeing_daily_summary")
+                                    .whereEqualTo("childId", selectedChildId)
+                                    .orderBy("date", Query.Direction.DESCENDING)
+                                    .limit(30)
+                                    .get()
+                                    .await()
+
+                                val moodMap = mutableMapOf<String, Pair<String, String>>() // date -> (emotion, source)
+
+                                for (doc in wellbeingDocs.documents) {
+                                    val date = doc.getString("date") ?: continue
+                                    val emotion = doc.getString("dominantEmotion") ?:
+                                    when (doc.getDouble("avg_sentiment")?.toInt()) {
+                                        in 80..100 -> "great"
+                                        in 60..79 -> "good"
+                                        in 40..59 -> "okay"
+                                        in 20..39 -> "anxious"
+                                        else -> "sad"
+                                    }
+                                    moodMap[date] = emotion to "📝 Child Logged"
+                                }
+
+                                // 2. Get MESSAGE ANALYSIS (inferred emotions)
+                                val messageDocs = firestore.collection("event_analysis")
+                                    .whereEqualTo("childId", selectedChildId)
+                                    .whereEqualTo("eventType", "MESSAGE")
+                                    .orderBy("timestamp", Query.Direction.DESCENDING)
+                                    .limit(200)
+                                    .get()
+                                    .await()
+
+                                val messageEmotions = mutableMapOf<String, MutableList<String>>()
+                                for (doc in messageDocs.documents) {
+                                    @Suppress("UNCHECKED_CAST")
+                                    val emotionVector = doc.get("emotionVector") as? Map<String, Double> ?: continue
+                                    val timestamp = doc.getLong("timestamp") ?: continue
+                                    val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(timestamp))
+
+                                    val topEmotion = emotionVector.maxByOrNull { it.value }?.key ?: continue
+                                    messageEmotions.getOrPut(date) { mutableListOf() }.add(topEmotion)
+                                }
+
+                                // Combine data
+                                val allDates = (moodMap.keys + messageEmotions.keys).distinct()
+                                emotionData = allDates.map { date ->
+                                    val (loggedEmotion, source) = moodMap[date] ?: (null to null)
+                                    val inferredEmotion = messageEmotions[date]?.groupingBy { it }?.eachCount()?.maxByOrNull { it.value }?.key
+
+                                    EmotionDayData(
+                                        date = date,
+                                        childLoggedEmotion = loggedEmotion,
+                                        inferredEmotion = inferredEmotion,
+                                        hasChildLog = source != null,
+                                        hasInferredData = inferredEmotion != null
+                                    )
+                                }.sortedByDescending { it.date }
+
+                            } catch (e: Exception) {
+                                Log.e("DASHBOARD", "Error loading emotion calendar: ${e.message}")
+                            }
+                        }
+                    }
+
                     DashboardCard(
-                        title = "Sentiment Trends",
-                        subtitle = "Based on journal entries and mood tracking over the past week",
-                        icon = "📈",
-                        iconColor = Color(0xFF3B82F6)
+                        title = "Emotion Calendar",
+                        subtitle = "😊 Child-logged moods | 🤖 AI-inferred from messages",
+                        icon = "📅",
+                        iconColor = Color(0xFF8B5CF6)
                     ) {
-                        if (sentimentData.all { it.score == 0 }) {
-                            Text("No mood data yet. Ask your child to check in daily.", color = Color(0xFF6B7280))
+                        if (emotionData.isEmpty()) {
+                            Text("No emotion data yet", color = Color(0xFF6B7280))
                         } else {
-                            SimpleBarChart(data = sentimentData)
+                            Column {
+                                // Legend
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                                    horizontalArrangement = Arrangement.SpaceEvenly
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Box(modifier = Modifier.size(12.dp).background(Color(0xFF10B981), RoundedCornerShape(2.dp)))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Child-logged", fontSize = 10.sp, color = Color(0xFF6B7280))
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Box(modifier = Modifier.size(12.dp).background(Color(0xFF8B5CF6), RoundedCornerShape(2.dp)))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("AI-inferred", fontSize = 10.sp, color = Color(0xFF6B7280))
+                                    }
+                                }
+
+                                // Calendar Grid (last 14 days)
+                                val dates = emotionData.take(14)
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    dates.chunked(7).forEach { week ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceEvenly
+                                        ) {
+                                            week.forEach { day ->
+                                                val dayOfMonth = day.date.substringAfterLast("-").toIntOrNull() ?: 0
+                                                val emotion = day.childLoggedEmotion ?: day.inferredEmotion
+                                                val bgColor = when (emotion) {
+                                                    "great", "happy" -> Color(0xFF10B981).copy(alpha = 0.8f)
+                                                    "good" -> Color(0xFF34D399).copy(alpha = 0.8f)
+                                                    "okay" -> Color(0xFFF59E0B).copy(alpha = 0.8f)
+                                                    "anxious" -> Color(0xFFF97316).copy(alpha = 0.8f)
+                                                    "sad" -> Color(0xFFEF4444).copy(alpha = 0.8f)
+                                                    else -> Color(0xFF9CA3AF).copy(alpha = 0.3f)
+                                                }
+                                                val borderColor = when {
+                                                    day.hasChildLog -> Color(0xFF10B981)
+                                                    day.hasInferredData -> Color(0xFF8B5CF6)
+                                                    else -> Color(0xFFE5E7EB)
+                                                }
+
+                                                Column(
+                                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                                    modifier = Modifier
+                                                        .size(44.dp)
+                                                        .clip(RoundedCornerShape(8.dp))
+                                                        .background(bgColor)
+                                                        .border(2.dp, borderColor, RoundedCornerShape(8.dp))
+                                                        .clickable {
+                                                            selectedDate = day.date
+                                                            selectedEmotion = emotion
+                                                            selectedSource = when {
+                                                                day.hasChildLog -> "Child manually logged"
+                                                                day.hasInferredData -> "AI inferred from messages"
+                                                                else -> "No data"
+                                                            }
+                                                        }
+                                                ) {
+                                                    Spacer(modifier = Modifier.weight(1f))
+                                                    Text(
+                                                        text = dayOfMonth.toString(),
+                                                        color = if (emotion != null) Color.White else Color(0xFF6B7280),
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.Medium
+                                                    )
+                                                    Spacer(modifier = Modifier.weight(1f))
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Selected date details
+                                if (selectedDate != null && selectedEmotion != null) {
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = Color(0xFFF3F4F6)
+                                    ) {
+                                        Column(modifier = Modifier.padding(12.dp)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text("📅 ", fontSize = 16.sp)
+                                                Text(
+                                                    text = SimpleDateFormat("EEEE, MMMM d", Locale.getDefault())
+                                                        .format(SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(selectedDate!!) ?: Date()),
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 14.sp
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                val emoji = when (selectedEmotion?.lowercase()) {
+                                                    "great", "happy" -> "😊"
+                                                    "good" -> "👍"
+                                                    "okay" -> "😐"
+                                                    "anxious" -> "😰"
+                                                    "sad" -> "😢"
+                                                    else -> "❓"
+                                                }
+                                                Text("$emoji ", fontSize = 16.sp)
+                                                Text(selectedEmotion?.replaceFirstChar { it.uppercase() } ?: "Unknown", fontWeight = FontWeight.Medium)
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Surface(
+                                                    shape = RoundedCornerShape(4.dp),
+                                                    color = if (selectedSource?.contains("Child") == true) Color(0xFF10B981).copy(alpha = 0.15f) else Color(0xFF8B5CF6).copy(alpha = 0.15f)
+                                                ) {
+                                                    Text(
+                                                        text = selectedSource?.let { if (it.contains("Child")) "📝 $it" else "🤖 $it" } ?: "❓ No data",
+                                                        fontSize = 10.sp,
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+
+
 
                 // Wellbeing Indicators Card
                 item {
                     DashboardCard(
                         title = "Wellbeing Indicators",
-                        subtitle = "Multi-dimensional assessment of emotional health",
+                        subtitle = "DistilBERT emotion analysis from messages & journal",
                         icon = "🛡️",
                         iconColor = Color(0xFF10B981)
                     ) {
                         if (wellbeingData.isEmpty() || wellbeingData.all { it.score == 0 }) {
-                            Text("Complete wellbeing assessment to see insights", color = Color(0xFF6B7280))
+                            Text("Emotion data will appear here once messages are analyzed", color = Color(0xFF6B7280))
                         } else {
                             SimpleBarChartHorizontal(data = wellbeingData)
                         }
                     }
                 }
 
+
                 // Music Insights Card
                 item {
                     DashboardCard(
                         title = "Music Insights",
+                        subtitle = "Mood detected from recently played tracks",
                         icon = "🎵",
                         iconColor = Color(0xFF8B5CF6)
                     ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            InsightRow(label = "Top Genre", value = musicInsights["topGenre"] ?: "No data yet")
-                            InsightRow(label = "Listening Time", value = musicInsights["listeningTime"] ?: "No music detected")
-                            InsightRow(label = "Pattern", value = musicInsights["moodCorrelation"] ?: "Listen to music for insights")
+                        MusicMoodSection(musicInsights)
+                    }
+                }
+
+// 🆕 TOP EMOTIONS CARD - ADD THIS HERE
+                item {
+                    var topEmotions by remember { mutableStateOf<List<Pair<String, Float>>>(emptyList()) }
+
+                    LaunchedEffect(selectedChildId) {
+                        if (selectedChildId != null && selectedChildId!!.isNotEmpty()) {
+                            try {
+                                val firestore = FirebaseFirestore.getInstance()
+                                val docs = firestore.collection("event_analysis")
+                                    .whereEqualTo("childId", selectedChildId)
+                                    .whereEqualTo("eventType", "MESSAGE")
+                                    .orderBy("timestamp", Query.Direction.DESCENDING)
+                                    .limit(20)
+                                    .get()
+                                    .await()
+
+                                val emotionSums = mutableMapOf<String, Float>()
+                                var count = 0
+
+                                for (doc in docs.documents) {
+                                    @Suppress("UNCHECKED_CAST")
+                                    val vector = doc.get("emotionVector") as? Map<String, Any> ?: continue
+                                    count++
+                                    vector.forEach { (emotion, scoreAny) ->
+                                        val score = when (scoreAny) {
+                                            is Double -> scoreAny.toFloat()
+                                            is Float -> scoreAny
+                                            else -> 0f
+                                        }
+                                        emotionSums[emotion] = (emotionSums[emotion] ?: 0f) + score
+                                    }
+                                }
+
+                                if (count > 0 && emotionSums.isNotEmpty()) {
+                                    topEmotions = emotionSums.map { (emotion, sum) ->
+                                        emotion to (sum / count)
+                                    }.sortedByDescending { it.second }.take(5)
+                                }
+                            } catch (e: Exception) {
+                                Log.e("DASHBOARD", "Error loading emotions: ${e.message}")
+                            }
+                        }
+                    }
+
+                    DashboardCard(
+                        title = "Current Emotions",
+                        subtitle = "From recent messages (last 20)",
+                        icon = "😊",
+                        iconColor = Color(0xFF8B5CF6)
+                    ) {
+                        if (topEmotions.isEmpty()) {
+                            Text("No message data yet", color = Color(0xFF6B7280), modifier = Modifier.padding(8.dp))
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                topEmotions.forEach { (emotion, score) ->
+                                    val emoji = EMOTION_EMOJIS[emotion] ?: "😐"
+                                    val color = EMOTION_COLORS[emotion] ?: Color(0xFF6B7280)
+                                    val percent = (score * 100).toInt()
+
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(emoji, fontSize = 20.sp, modifier = Modifier.width(36.dp))
+                                        Text(
+                                            text = emotion.replaceFirstChar { it.uppercase() },
+                                            color = Color(0xFF374151),
+                                            fontSize = 14.sp,
+                                            modifier = Modifier.width(100.dp)
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(8.dp)
+                                                .background(Color(0xFFE5E7EB), RoundedCornerShape(4.dp))
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxHeight()
+                                                    .fillMaxWidth(percent / 100f)
+                                                    .background(color, RoundedCornerShape(4.dp))
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "$percent%",
+                                            color = color,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            modifier = Modifier.width(40.dp)
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
-                // App Usage Card
+// App Usage Card
                 item {
                     DashboardCard(
                         title = "App Usage",
+                        subtitle = appUsage["screenTime"] ?: "No data yet",
                         icon = "📱",
                         iconColor = Color(0xFFF59E0B)
                     ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            InsightRow(label = "Screen Time", value = appUsage["screenTime"] ?: "No data yet")
-                            InsightRow(label = "Top Apps", value = if (topAppsList.isNotEmpty()) topAppsList.joinToString(", ") else "No apps tracked")
-                            InsightRow(label = "Productive Time", value = appUsage["productiveTime"] ?: "—")
-                        }
+                        AppUsageSection(topAppsList)
                     }
                 }
 
@@ -599,24 +897,43 @@ fun loadTbatsAnalysis(childId: String, onResult: (Map<String, Any>) -> Unit) {
                 val usageAnalysis = json.optJSONObject("usage_analysis") ?: JSONObject()
                 val concernLevel = json.optString("concern_level", "LOW")
 
+                val musicConcern = musicAnalysis.optString("concern_level", "LOW")
+                val hasMusicData = musicAnalysis.optBoolean("has_music_data", false)
+                val moodDesc     = musicAnalysis.optString("mood_description", "")
+                val trackCount   = musicAnalysis.optInt("total_tracks", 0)
+                val dataNoteM    = musicAnalysis.optString("data_note", "")
+
                 val musicInsight = when {
-                    musicAnalysis.has("concern_level") && musicAnalysis.getString("concern_level") == "HIGH" ->
+                    musicConcern == "HIGH" ->
                         "🎵 Unusual music mood patterns detected"
-                    musicAnalysis.has("concern_level") && musicAnalysis.getString("concern_level") == "MEDIUM" ->
+                    musicConcern == "MEDIUM" ->
                         "🎵 Slight changes in music preferences"
-                    musicAnalysis.has("current_score") ->
-                        "🎵 Current mood score: ${String.format("%.2f", musicAnalysis.optDouble("current_score"))}"
-                    else -> "🎵 Not enough music data yet"
+                    hasMusicData && moodDesc.isNotEmpty() ->
+                        "🎵 Mood: $moodDesc ($trackCount tracks)"
+                    musicAnalysis.has("current_score") && !musicAnalysis.has("error") ->
+                        "🎵 Score: ${String.format("%.2f", musicAnalysis.optDouble("current_score"))}" +
+                        if (dataNoteM.isNotEmpty()) " — $dataNoteM" else ""
+                    dataNoteM.isNotEmpty() ->
+                        "🎵 $dataNoteM"
+                    else -> "🎵 No music data yet"
                 }
 
+                val usageConcern = usageAnalysis.optString("concern_level", "LOW")
+                val dataNoteU    = usageAnalysis.optString("data_note", "")
+                val usageDays    = usageAnalysis.optInt("data_points", 0)
+
                 val usageInsight = when {
-                    usageAnalysis.has("concern_level") && usageAnalysis.getString("concern_level") == "HIGH" ->
+                    usageConcern == "HIGH" ->
                         "📱 Significant screen time changes detected"
-                    usageAnalysis.has("concern_level") && usageAnalysis.getString("concern_level") == "MEDIUM" ->
+                    usageConcern == "MEDIUM" ->
                         "📱 Slight increase in screen time"
-                    usageAnalysis.has("current_score") ->
-                        "📱 Screen time score: ${String.format("%.2f", usageAnalysis.optDouble("current_score"))}"
-                    else -> "📱 Not enough app usage data yet"
+                    usageAnalysis.has("current_score") && !usageAnalysis.has("error") ->
+                        "📱 Score: ${String.format("%.2f", usageAnalysis.optDouble("current_score"))}" +
+                        if (usageDays > 0) " ($usageDays days)" else "" +
+                        if (dataNoteU.isNotEmpty()) " — $dataNoteU" else ""
+                    dataNoteU.isNotEmpty() ->
+                        "📱 $dataNoteU"
+                    else -> "📱 No app usage data yet"
                 }
 
                 // FIXED: Use proper mapOf with Pair syntax
@@ -763,7 +1080,7 @@ fun loadDashboardDataFromFirebase(
         safety: List<SafetyIndicator>,
         music: Map<String, String>,
         appUsage: Map<String, String>,
-        topApps: List<String>
+        topApps: List<AppUsageItem>
     ) -> Unit
 ) {
     GlobalScope.launch {
@@ -784,8 +1101,11 @@ fun loadDashboardDataFromFirebase(
             val moodScoreByDate = mutableMapOf<String, Int>()
             for (doc in moodDocs.documents) {
                 val date = doc.getString("date") ?: continue
-                val avgSentiment = doc.getDouble("avg_sentiment") ?: 0.5
-                moodScoreByDate[date] = (avgSentiment * 100).toInt()
+                // Saved by backend as emotionalWellbeingScore, fallback to dailyMoodScore
+                val score = doc.getDouble("emotionalWellbeingScore")
+                    ?: doc.getDouble("dailyMoodScore")
+                    ?: 0.5
+                moodScoreByDate[date] = (score * 100).toInt()
             }
 
             val sentiments = (6 downTo 0).map { daysAgo ->
@@ -795,9 +1115,10 @@ fun loadDashboardDataFromFirebase(
             }
 
             // ========== ADDED: APP USAGE ==========
+            // Single-field filter only — no composite index required; filter by timestamp in Kotlin
             val usageDocs = firestore.collection("app_usage")
                 .whereEqualTo("childId", childId)
-                .whereGreaterThan("timestamp", sevenDaysAgo)
+                .limit(30)
                 .get()
                 .await()
 
@@ -806,6 +1127,8 @@ fun loadDashboardDataFromFirebase(
             var daysWithData = 0
 
             for (doc in usageDocs.documents) {
+                val docTs = doc.getLong("timestamp") ?: 0L
+                if (docTs < sevenDaysAgo) continue
                 daysWithData++
                 totalScreenTimeMin += doc.getLong("totalTimeMin") ?: 0L
 
@@ -829,16 +1152,50 @@ fun loadDashboardDataFromFirebase(
             val topAppsList = allApps.entries
                 .sortedByDescending { it.value }
                 .take(5)
-                .map { it.key }
+                .map { AppUsageItem(it.key, it.value) }
             // ========== END OF APP USAGE ==========
 
-            // Everything below is EXACTLY as you had it
-            val wellbeing = listOf(
-                WellbeingData("Emotional", sentiments.filter { it.score > 0 }.map { it.score }.average().toInt().coerceIn(0, 100)),
-                WellbeingData("Consistency", ((moodDocs.size().toFloat() / 7f) * 100).toInt().coerceIn(0, 100)),
-                WellbeingData("Screen Time", 75),
-                WellbeingData("Music Engagement", 50)
-            )
+            // ========== WELLBEING INDICATORS: DistilBERT emotion averages ==========
+            // Pull last 200 analyzed events for this child from Firestore
+            val emotionDocs = firestore.collection("event_analysis")
+                .whereEqualTo("childId", childId)
+                .limit(200)
+                .get()
+                .await()
+
+            val emotionSums = mutableMapOf<String, Double>()
+            var emotionEventCount = 0
+            for (doc in emotionDocs.documents) {
+                val eventType = doc.getString("eventType") ?: continue
+                if (eventType != "MESSAGE" && eventType != "JOURNAL") continue
+                @Suppress("UNCHECKED_CAST")
+                val vector = doc.get("emotionVector") as? Map<String, Any> ?: continue
+                emotionEventCount++
+                vector.forEach { (emotion, scoreAny) ->
+                    val score = when (scoreAny) {
+                        is Double -> scoreAny
+                        is Float  -> scoreAny.toDouble()
+                        is Long   -> scoreAny.toDouble()
+                        else      -> 0.0
+                    }
+                    emotionSums[emotion] = (emotionSums[emotion] ?: 0.0) + score
+                }
+            }
+
+            val wellbeing: List<WellbeingData> = if (emotionEventCount > 0 && emotionSums.isNotEmpty()) {
+                emotionSums.entries
+                    .map { (emotion, sum) ->
+                        WellbeingData(
+                            category = emotion.replaceFirstChar { it.uppercase() },
+                            score    = ((sum / emotionEventCount) * 100).toInt().coerceIn(0, 100)
+                        )
+                    }
+                    .sortedByDescending { it.score }
+                    .take(8)
+            } else {
+                listOf(WellbeingData("No data yet", 0))
+            }
+            // ========== END WELLBEING INDICATORS ==========
 
             val safety = listOf(
                 SafetyIndicator("Content Safety", "none", "No risks detected"),
@@ -846,11 +1203,53 @@ fun loadDashboardDataFromFirebase(
                 SafetyIndicator("Monitoring Status", "none", "Real-time protection active")
             )
 
-            val musicMap = mapOf(
-                "topGenre" to "Awaiting data",
-                "listeningTime" to "No music detected",
-                "moodCorrelation" to "Listen to music for insights"
+            // ========== MUSIC INSIGHTS (from processed RF emotion results) ==========
+            // Single-field filter only — no composite index required; filter in Kotlin
+            val musicDocs = firestore.collection("music_tracking")
+                .whereEqualTo("childId", childId)
+                .limit(50)
+                .get()
+                .await()
+
+            val emotionCounts = mutableMapOf<String, Int>()
+            var totalTracks = 0
+            for (doc in musicDocs.documents) {
+                if (doc.getBoolean("emotion_processed") != true) continue
+                @Suppress("UNCHECKED_CAST")
+                val emotionResults = doc.get("emotion_results") as? List<Map<String, Any>> ?: emptyList()
+                for (entry in emotionResults) {
+                    val emotion = entry["emotion"] as? String ?: continue
+                    emotionCounts[emotion] = (emotionCounts[emotion] ?: 0) + 1
+                    totalTracks++
+                }
+            }
+
+            val emotionMoodMap = mapOf(
+                "happy"     to "Positive / Upbeat",
+                "party"     to "Social / Energetic",
+                "energetic" to "Energetic",
+                "romantic"  to "Calm / Romantic",
+                "chill"     to "Relaxed",
+                "calm"      to "Calm / Peaceful",
+                "focus"     to "Focused / Neutral",
+                "sad"       to "Melancholic"
             )
+
+            val dominantEmotion = emotionCounts.maxByOrNull { it.value }?.key
+            val musicMap = if (dominantEmotion != null) {
+                mapOf(
+                    "topGenre"        to (emotionMoodMap[dominantEmotion] ?: dominantEmotion.replaceFirstChar { it.uppercase() }),
+                    "listeningTime"   to "$totalTracks tracks analyzed",
+                    "moodCorrelation" to "Mood: ${dominantEmotion.replaceFirstChar { it.uppercase() }}"
+                )
+            } else {
+                mapOf(
+                    "topGenre"        to "No data yet",
+                    "listeningTime"   to "No music detected",
+                    "moodCorrelation" to "Listen to music for insights"
+                )
+            }
+            // ========== END MUSIC INSIGHTS ==========
 
             onResult(sentiments, wellbeing, safety, musicMap, usageMap, topAppsList)
 
@@ -871,15 +1270,17 @@ fun loadAlertsFromFirebase(
             val firestore = FirebaseFirestore.getInstance()
             val twentyFourHoursAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
 
-            // Read from risk_assessment (NO URL field stored)
+            // Single-field filter only — no composite index required; filter by time in Kotlin
             val assessments = firestore.collection("risk_assessment")
                 .whereEqualTo("childId", childId)
-                .whereGreaterThan("timestamp", twentyFourHoursAgo)
+                .limit(100)
                 .get()
                 .await()
 
-            // Create alerts without exposing URLs
+            // Create alerts without exposing URLs; filter last 24h in Kotlin
             val alerts = assessments.documents.mapNotNull { doc ->
+                val ts = doc.getLong("timestamp") ?: 0L
+                if (ts < twentyFourHoursAgo) return@mapNotNull null
                 val riskLevel = doc.getString("riskLevel") ?: return@mapNotNull null
                 if (riskLevel !in listOf("HIGH", "CRITICAL")) return@mapNotNull null
 
@@ -1106,18 +1507,35 @@ fun DashboardCard(
 fun SimpleBarChart(data: List<SentimentData>) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceEvenly
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.Bottom
     ) {
         data.forEach { item ->
+            val barColor = when {
+                item.score >= 65 -> Color(0xFF10B981)
+                item.score >= 35 -> Color(0xFFF59E0B)
+                item.score > 0  -> Color(0xFFEF4444)
+                else            -> Color(0xFFE5E7EB)
+            }
+            val barHeight = if (item.score > 0) maxOf(6f, item.score * 0.9f).dp else 6.dp
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.weight(1f)
             ) {
+                if (item.score > 0) {
+                    Text(
+                        text = "${item.score}%",
+                        color = barColor,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                }
                 Box(
                     modifier = Modifier
-                        .width(24.dp)
-                        .height((item.score * 1.5).dp)
-                        .background(Color(0xFF3B82F6), RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
+                        .width(22.dp)
+                        .height(barHeight)
+                        .background(barColor, RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -1130,38 +1548,207 @@ fun SimpleBarChart(data: List<SentimentData>) {
     }
 }
 
+private val EMOTION_EMOJIS = mapOf(
+    "admiration" to "🌟", "amusement" to "😄", "anger" to "😠", "annoyance" to "😒",
+    "approval" to "👍", "caring" to "💚", "confusion" to "🤔", "curiosity" to "🧐",
+    "desire" to "💫", "disappointment" to "😔", "disapproval" to "👎", "disgust" to "🤢",
+    "embarrassment" to "😳", "excitement" to "🤩", "fear" to "😨", "gratitude" to "🙏",
+    "grief" to "😢", "joy" to "😊", "love" to "❤️", "nervousness" to "😬",
+    "optimism" to "🌈", "pride" to "💪", "realization" to "💡", "relief" to "😌",
+    "remorse" to "😞", "sadness" to "😢", "surprise" to "😮", "neutral" to "😐"
+)
+
+private val EMOTION_COLORS = mapOf(
+    "admiration" to Color(0xFF10B981), "amusement" to Color(0xFF10B981),
+    "anger" to Color(0xFFEF4444), "annoyance" to Color(0xFFF59E0B),
+    "approval" to Color(0xFF10B981), "caring" to Color(0xFF10B981),
+    "confusion" to Color(0xFF8B5CF6), "curiosity" to Color(0xFF3B82F6),
+    "desire" to Color(0xFF8B5CF6), "disappointment" to Color(0xFFF59E0B),
+    "disapproval" to Color(0xFFF59E0B), "disgust" to Color(0xFFEF4444),
+    "embarrassment" to Color(0xFFF59E0B), "excitement" to Color(0xFF10B981),
+    "fear" to Color(0xFFEF4444), "gratitude" to Color(0xFF10B981),
+    "grief" to Color(0xFFEF4444), "joy" to Color(0xFF10B981),
+    "love" to Color(0xFFEC4899), "nervousness" to Color(0xFFF59E0B),
+    "optimism" to Color(0xFF10B981), "pride" to Color(0xFF10B981),
+    "realization" to Color(0xFF3B82F6), "relief" to Color(0xFF10B981),
+    "remorse" to Color(0xFFF59E0B), "sadness" to Color(0xFFEF4444),
+    "surprise" to Color(0xFF8B5CF6), "neutral" to Color(0xFF6B7280)
+)
+
 @Composable
 fun SimpleBarChartHorizontal(data: List<WellbeingData>) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         data.forEach { item ->
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            val key = item.category.lowercase()
+            val emoji = EMOTION_EMOJIS[key] ?: "●"
+            val barColor = EMOTION_COLORS[key] ?: Color(0xFF3B82F6)
+            val fraction = (item.score / 100f).coerceIn(0f, 1f)
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(text = emoji, fontSize = 15.sp, modifier = Modifier.width(22.dp))
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = item.category,
                     color = Color(0xFF374151),
-                    fontSize = 14.sp,
-                    modifier = Modifier.width(80.dp)
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.width(96.dp)
                 )
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .height(24.dp)
-                        .background(Color(0xFFE5E7EB), RoundedCornerShape(12.dp))
+                        .height(8.dp)
+                        .background(Color(0xFFE5E7EB), RoundedCornerShape(4.dp))
                 ) {
                     Box(
                         modifier = Modifier
                             .fillMaxHeight()
-                            .fillMaxWidth(fraction = item.score / 100f)
-                            .background(Color(0xFF10B981), RoundedCornerShape(12.dp))
+                            .fillMaxWidth(fraction)
+                            .background(barColor, RoundedCornerShape(4.dp))
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "${item.score}",
-                    color = Color(0xFF6B7280),
+                    text = "${item.score}%",
+                    color = barColor,
                     fontSize = 12.sp,
-                    modifier = Modifier.width(30.dp)
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.width(36.dp)
+                )
+            }
+        }
+    }
+}
+
+private val MUSIC_MOOD_EMOJIS = mapOf(
+    "happy" to "😊", "party" to "🎉", "energetic" to "⚡",
+    "romantic" to "💕", "chill" to "😌", "calm" to "🌊",
+    "focus" to "🎯", "sad" to "💙"
+)
+
+private val MUSIC_MOOD_COLORS = mapOf(
+    "happy" to Color(0xFF10B981), "party" to Color(0xFFEC4899),
+    "energetic" to Color(0xFFF59E0B), "romantic" to Color(0xFFEC4899),
+    "chill" to Color(0xFF3B82F6), "calm" to Color(0xFF3B82F6),
+    "focus" to Color(0xFF8B5CF6), "sad" to Color(0xFF6B7280)
+)
+
+@Composable
+fun MusicMoodSection(musicInsights: Map<String, String>) {
+    val moodCorr = musicInsights["moodCorrelation"] ?: ""
+    val dominantRaw = moodCorr.removePrefix("Mood: ").trim().lowercase()
+    val hasMood = dominantRaw.isNotEmpty() && musicInsights["topGenre"] != "No data yet"
+
+    if (!hasMood) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+            Text("🎵", fontSize = 36.sp)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("No music detected yet", color = Color(0xFF9CA3AF), fontSize = 14.sp)
+            Text("Play some music on the child's device", color = Color(0xFFD1D5DB), fontSize = 12.sp)
+        }
+    } else {
+        val emoji = MUSIC_MOOD_EMOJIS[dominantRaw] ?: "🎵"
+        val moodColor = MUSIC_MOOD_COLORS[dominantRaw] ?: Color(0xFF8B5CF6)
+        val moodLabel = musicInsights["topGenre"] ?: dominantRaw.replaceFirstChar { it.uppercase() }
+        val trackInfo = musicInsights["listeningTime"] ?: ""
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = moodColor.copy(alpha = 0.12f),
+                modifier = Modifier.size(64.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(emoji, fontSize = 32.sp)
+                }
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Column {
+                Text(
+                    text = moodLabel,
+                    color = Color(0xFF111827),
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = moodColor.copy(alpha = 0.15f)
+                ) {
+                    Text(
+                        text = dominantRaw.replaceFirstChar { it.uppercase() },
+                        color = moodColor,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+                    )
+                }
+                if (trackInfo.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(trackInfo, color = Color(0xFF9CA3AF), fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
+
+private fun formatAppTime(timeMin: Long): String {
+    if (timeMin <= 0) return "< 1m"
+    val h = timeMin / 60
+    val m = timeMin % 60
+    return when {
+        h > 0 && m > 0 -> "${h}h ${m}m"
+        h > 0 -> "${h}h"
+        else -> "${m}m"
+    }
+}
+
+@Composable
+fun AppUsageSection(apps: List<AppUsageItem>) {
+    if (apps.isEmpty()) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+            Text("📱", fontSize = 36.sp)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("No app usage data yet", color = Color(0xFF9CA3AF), fontSize = 14.sp)
+        }
+        return
+    }
+    val maxTime = apps.maxOf { it.timeMin }.coerceAtLeast(1L)
+    val appColors = listOf(
+        Color(0xFF3B82F6), Color(0xFF10B981), Color(0xFFF59E0B),
+        Color(0xFF8B5CF6), Color(0xFFEF4444)
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        apps.forEachIndexed { index, app ->
+            val fraction = (app.timeMin.toFloat() / maxTime).coerceIn(0f, 1f)
+            val barColor = appColors[index % appColors.size]
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = app.name.take(16),
+                    color = Color(0xFF374151),
+                    fontSize = 13.sp,
+                    modifier = Modifier.width(110.dp)
+                )
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(10.dp)
+                        .background(Color(0xFFE5E7EB), RoundedCornerShape(5.dp))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(fraction)
+                            .background(barColor, RoundedCornerShape(5.dp))
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = formatAppTime(app.timeMin),
+                    color = barColor,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.width(44.dp)
                 )
             }
         }

@@ -229,35 +229,37 @@ class DataCollector(private val context: Context) {
             try {
                 val auth = FirebaseAuth.getInstance()
                 val currentUser = auth.currentUser ?: return@launch
+                val firestore = FirebaseFirestore.getInstance()
 
-                // Process each track and send to backend for mood classification
+                // Build entries list for the music_tracking document
+                val entriesList = mutableListOf<Map<String, Any>>()
                 for (i in 0 until musicArray.length()) {
                     val track = musicArray.getJSONObject(i)
                     val trackInfo = track.getJSONObject("track_info")
                     val timestamp = track.getLong("timestamp")
-
-                    // Create music event data
-                    val musicEventData = JSONObject().apply {
-                        put("track_info", JSONObject().apply {
-                            put("artist", trackInfo.getString("artist"))
-                            put("track", trackInfo.getString("track"))
-                        })
-                        put("timestamp", timestamp)
-                    }
-
-                    // Capture as event for backend ML (for mood analysis)
-                    val eventId = repository.captureEvent(
-                        eventType = "MUSIC",
-                        rawText = musicEventData.toString(),
-                        textPreview = "${trackInfo.getString("artist")} - ${trackInfo.getString("track")}",
-                        timestampUtc = timestamp
+                    entriesList.add(
+                        mapOf(
+                            "track_info" to mapOf(
+                                "artist" to trackInfo.optString("artist", "Unknown Artist"),
+                                "track"  to trackInfo.optString("track",  "Unknown Track")
+                            ),
+                            "timestamp" to timestamp
+                        )
                     )
-
-                    // REAL-TIME: Sync music for mood classification
-                    BackendSyncManager(context).syncSingleEvent(eventId, musicEventData.toString())
                 }
 
-                Log.d(TAG, "✅ Music data sent to backend for mood analysis (${musicArray.length()} tracks)")
+                // Write a single music_tracking doc for this batch (backend reads this for RF classification)
+                val musicTrackingData = mapOf(
+                    "childId"          to currentUser.uid,
+                    "timestamp"        to System.currentTimeMillis(),
+                    "entries"          to entriesList,
+                    "emotion_processed" to false
+                )
+                firestore.collection("music_tracking")
+                    .add(musicTrackingData)
+                    .await()
+
+                Log.d(TAG, "✅ Music batch written to music_tracking (${entriesList.size} tracks)")
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error writing music data: ${e.message}")
@@ -268,68 +270,8 @@ class DataCollector(private val context: Context) {
 
     // Save Messages
     fun saveMessages() {
-        Log.d(TAG, "💬 Saving messages...")
-        Thread {
-            try {
-                val messagesFile = File(context.filesDir, "messages.txt")
-                if (!messagesFile.exists()) {
-                    Log.d(TAG, "📭 No messages.txt found")
-                    return@Thread
-                }
-
-                val messages = messagesFile.readLines().filter { it.isNotBlank() }
-                if (messages.isEmpty()) return@Thread
-
-                // Get already saved message hashes to avoid duplicates
-                val prefs = context.getSharedPreferences("msg_prefs", Context.MODE_PRIVATE)
-                val savedHashes = prefs.getStringSet("saved_message_hashes", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
-
-                val newMessages = mutableListOf<String>()
-                val newHashes = mutableSetOf<String>()
-
-                messages.forEach { msg ->
-                    val hash = msg.hashCode().toString()
-                    if (!savedHashes.contains(hash)) {
-                        newMessages.add(msg)
-                        newHashes.add(hash)
-                    }
-                }
-
-                if (newMessages.isEmpty()) {
-                    Log.d(TAG, "📭 No new messages to save")
-                    // Still clear the file to avoid reprocessing
-                    messagesFile.writeText("")
-                    return@Thread
-                }
-
-                val now = System.currentTimeMillis()
-
-                // Save only new messages to Room
-                runBlocking {
-                    repository.ensureDeviceProfile()
-                    newMessages.takeLast(50).forEach { msg ->
-                        repository.captureEvent(
-                            eventType = "MESSAGE",
-                            rawText = msg,
-                            textPreview = msg.take(100),
-                            timestampUtc = now
-                        )
-                    }
-                }
-
-                // Update saved hashes
-                savedHashes.addAll(newHashes)
-                prefs.edit().putStringSet("saved_message_hashes", savedHashes).apply()
-
-                // Clear the file after processing
-                messagesFile.writeText("")
-
-                Log.d(TAG, "✅ Saved ${newMessages.size} new messages (${messages.size - newMessages.size} duplicates skipped)")
-
-            } catch (e: Exception) {
-                Log.e(TAG, "❌ Error saving messages: ${e.message}")
-            }
-        }.start()
+        // DISABLED - Messages are sent directly from AccessibilityService
+        Log.d(TAG, "💬 saveMessages() is disabled - using real-time from service")
     }
 
     private fun appendToFileWithDedup(fileName: String, newEntry: JSONObject, dedupKey: String) {
@@ -621,7 +563,32 @@ class DataCollector(private val context: Context) {
     private fun updateOrCreateTodayUsage(date: String, additionalTimeMs: Long, newApps: JSONArray) {
         GlobalScope.launch {
             try {
+                val auth = FirebaseAuth.getInstance()
+                val currentUser = auth.currentUser ?: return@launch
+                val firestore = FirebaseFirestore.getInstance()
+                val docId = "${currentUser.uid}_$date"
+                val docRef = firestore.collection("app_usage").document(docId)
 
+                val existing = docRef.get().await()
+                val existingApps: List<Map<String, Any>> = if (existing.exists()) {
+                    @Suppress("UNCHECKED_CAST")
+                    existing.get("apps") as? List<Map<String, Any>> ?: emptyList()
+                } else emptyList()
+                val existingTotalMin = if (existing.exists()) (existing.getLong("totalTimeMin") ?: 0L) else 0L
+
+                val mergedApps = mergeAppLists(existingApps, newApps)
+                val addedMin = additionalTimeMs / 60000L
+
+                val updatedData = mapOf(
+                    "childId"      to currentUser.uid,
+                    "date"         to date,
+                    "timestamp"    to System.currentTimeMillis(),
+                    "totalTimeMin" to existingTotalMin + addedMin,
+                    "appCount"     to mergedApps.size,
+                    "apps"         to mergedApps
+                )
+                docRef.set(updatedData).await()
+                Log.d(TAG, "✅ Incremental app usage updated in Firestore (+${addedMin}min)")
             } catch (e: Exception) {
                 Log.e(TAG, "Error updating app usage: ${e.message}")
             }

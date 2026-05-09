@@ -51,6 +51,36 @@ data class EmotionDayData(
     val hasChildLog: Boolean,
     val hasInferredData: Boolean
 )
+
+data class CategoryAnomalyData(
+    val category: String,
+    val enoughData: Boolean,
+    val isAnomaly: Boolean,
+    val actual: Float,
+    val forecast: Float,
+    val direction: String
+)
+
+data class EmotionAnomalyData(
+    val emotion: String,
+    val enoughData: Boolean,
+    val isAnomaly: Boolean,
+    val actual: Float,
+    val forecast: Float,
+    val direction: String
+)
+
+data class TbatsAnalysisResult(
+    val concernLevel: String,
+    val musicInsight: String,
+    val usageInsight: String,
+    val appEnoughData: Boolean,
+    val appDaysCollected: Int,
+    val appCategoryAnomalies: List<CategoryAnomalyData>,
+    val musicEnoughData: Boolean,
+    val musicDaysCollected: Int,
+    val musicEmotionAnomalies: List<EmotionAnomalyData>
+)
 @Composable
 fun ParentDashboard(
     onNavigate: (String) -> Unit,
@@ -77,6 +107,12 @@ fun ParentDashboard(
     var tbatsConcernLevel by remember { mutableStateOf("LOW") }
     var tbatsMusicInsight by remember { mutableStateOf("") }
     var tbatsUsageInsight by remember { mutableStateOf("") }
+    var appCategoryAnomalies by remember { mutableStateOf<List<CategoryAnomalyData>>(emptyList()) }
+    var appAnomalyEnoughData by remember { mutableStateOf<Boolean?>(null) }
+    var appAnomalyDaysCollected by remember { mutableStateOf(0) }
+    var musicEmotionAnomalies by remember { mutableStateOf<List<EmotionAnomalyData>>(emptyList()) }
+    var musicAnomalyEnoughData by remember { mutableStateOf<Boolean?>(null) }
+    var musicAnomalyDaysCollected by remember { mutableStateOf(0) }
     // Load children when parent ID changes (sign in/out)
     LaunchedEffect(currentParentId) {
         if (currentParentId.isNotEmpty()) {
@@ -123,12 +159,18 @@ fun ParentDashboard(
                 isLoadingAlerts = false
             }
 
-            // 🆕 LOAD TBATS ANALYSIS (Behavioral Change Detection)
+            // LOAD TBATS ANALYSIS (Behavioral Change Detection)
             loadTbatsAnalysis(context, childId) { result ->
-                android.util.Log.d("DASHBOARD", "TBATS result: ${result["concern_level"]}")
-                tbatsConcernLevel = result["concern_level"] as? String ?: "LOW"
-                tbatsMusicInsight = result["music_insight"] as? String ?: ""
-                tbatsUsageInsight = result["usage_insight"] as? String ?: ""
+                android.util.Log.d("DASHBOARD", "TBATS result: ${result.concernLevel}")
+                tbatsConcernLevel       = result.concernLevel
+                tbatsMusicInsight       = result.musicInsight
+                tbatsUsageInsight       = result.usageInsight
+                appAnomalyEnoughData    = result.appEnoughData
+                appAnomalyDaysCollected = result.appDaysCollected
+                appCategoryAnomalies    = result.appCategoryAnomalies
+                musicAnomalyEnoughData    = result.musicEnoughData
+                musicAnomalyDaysCollected = result.musicDaysCollected
+                musicEmotionAnomalies     = result.musicEmotionAnomalies
             }
 
         } else {
@@ -1010,121 +1052,60 @@ fun ParentDashboard(
                     }
                 }
 
-                // Behavioral Pattern Analysis (TBATS + local stats)
+                // Behavioral Pattern Analysis — two-tab: App Usage Anomalies | Music Emotion Anomalies
                 item {
-                    var localEventCount by remember { mutableStateOf(0) }
-                    var localHighRisk by remember { mutableStateOf(0) }
-                    var localAvgSentiment by remember { mutableStateOf<Float?>(null) }
-                    var localDominantEmotion by remember { mutableStateOf<String?>(null) }
-
-                    // Load local stats from event_analysis regardless of TBATS availability
-                    LaunchedEffect(selectedChildId) {
-                        if (selectedChildId == null) return@LaunchedEffect
-                        try {
-                            val raw = FirebaseFirestore.getInstance()
-                                .collection("event_analysis")
-                                .whereEqualTo("childId", selectedChildId)
-                                .limit(60).get().await()
-
-                            val sevenDaysAgo = System.currentTimeMillis() - 7 * 24 * 60 * 60 * 1000L
-                            val recent = raw.documents.filter { (it.getLong("timestamp") ?: 0L) >= sevenDaysAgo }
-                            localEventCount = recent.size
-                            localHighRisk = recent.count { it.getString("riskLevel") in listOf("HIGH", "CRITICAL") }
-
-                            val sentiments = recent.mapNotNull { it.getDouble("sentimentScore")?.toFloat() }
-                            if (sentiments.isNotEmpty()) localAvgSentiment = sentiments.average().toFloat()
-
-                            val emotionCounts = mutableMapOf<String, Float>()
-                            recent.forEach { doc ->
-                                @Suppress("UNCHECKED_CAST")
-                                val vec = doc.get("emotionVector") as? Map<String, Any> ?: return@forEach
-                                vec.forEach { (e, v) ->
-                                    val s = when (v) { is Double -> v.toFloat(); is Float -> v; else -> 0f }
-                                    emotionCounts[e] = (emotionCounts[e] ?: 0f) + s
-                                }
-                            }
-                            localDominantEmotion = emotionCounts.maxByOrNull { it.value }?.key
-                        } catch (_: Exception) {}
-                    }
-
-                    val concernColor = when (tbatsConcernLevel) {
-                        "HIGH" -> Color(0xFFEF4444)
-                        "MEDIUM" -> Color(0xFFF59E0B)
-                        else -> Color(0xFF10B981)
-                    }
-                    val noTbatsInsights = tbatsMusicInsight.isEmpty() && tbatsUsageInsight.isEmpty()
+                    var selectedBehaviorTab by remember { mutableStateOf(0) }
 
                     DashboardCard(
                         title = "Behavioral Pattern Analysis",
-                        subtitle = "AI-detected changes in digital behavior",
+                        subtitle = "TBATS anomaly detection on digital behavior",
                         icon = "🧠",
-                        iconColor = concernColor
+                        iconColor = Color(0xFF6366F1)
                     ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            // TBATS concern badge
-                            Surface(shape = RoundedCornerShape(50), color = concernColor.copy(alpha = 0.15f)) {
-                                Text(
-                                    text = "Concern Level: $tbatsConcernLevel",
-                                    color = concernColor, fontWeight = FontWeight.Bold, fontSize = 13.sp,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                                )
-                            }
-
-                            if (!noTbatsInsights) {
-                                if (tbatsMusicInsight.isNotEmpty()) Text(tbatsMusicInsight, color = Color(0xFF374151), fontSize = 13.sp)
-                                if (tbatsUsageInsight.isNotEmpty()) Text(tbatsUsageInsight, color = Color(0xFF374151), fontSize = 13.sp)
-                            } else {
-                                // TBATS needs 14+ days of data — show local stats as substitute
-                                Surface(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = Color(0xFFFFF8E7)
-                                ) {
-                                    Text(
-                                        "⏳ Pattern analysis needs 14+ days of data. Showing 7-day snapshot below.",
-                                        color = Color(0xFF92400E), fontSize = 11.sp,
-                                        modifier = Modifier.padding(8.dp)
-                                    )
-                                }
-                            }
-
-                            // Always show local 7-day stats
-                            if (localEventCount > 0) {
-                                Spacer(Modifier.height(4.dp))
-                                Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFF3F4F6)))
-                                Spacer(Modifier.height(4.dp))
-                                Text("Last 7 Days — Quick Stats", color = Color(0xFF6B7280), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    StatChip("📊 $localEventCount events", Color(0xFF3B82F6))
-                                    if (localHighRisk > 0) StatChip("🚨 $localHighRisk alerts", Color(0xFFEF4444))
-                                    else StatChip("✅ 0 alerts", Color(0xFF10B981))
-                                }
-                                localAvgSentiment?.let { s ->
-                                    val sentLabel = when {
-                                        s >= 0.65f -> "Positive mood"
-                                        s >= 0.45f -> "Neutral mood"
-                                        else -> "Low mood signals"
-                                    }
-                                    val sentColor = when {
-                                        s >= 0.65f -> Color(0xFF10B981)
-                                        s >= 0.45f -> Color(0xFFF59E0B)
-                                        else -> Color(0xFFEF4444)
-                                    }
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text("Avg sentiment: ", color = Color(0xFF6B7280), fontSize = 12.sp)
-                                        Surface(shape = RoundedCornerShape(4.dp), color = sentColor.copy(alpha = 0.12f)) {
-                                            Text(sentLabel, color = sentColor, fontSize = 12.sp, fontWeight = FontWeight.Medium,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                        Column {
+                            // Tab row (mirrors Wellbeing Indicators pattern)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0xFFF3F4F6), RoundedCornerShape(12.dp))
+                                    .padding(4.dp)
+                            ) {
+                                listOf("📱" to "App Usage", "🎵" to "Music Moods").forEachIndexed { idx, (icon, label) ->
+                                    Surface(
+                                        modifier = Modifier.weight(1f).clickable { selectedBehaviorTab = idx },
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = if (selectedBehaviorTab == idx) Color.White else Color.Transparent,
+                                        shadowElevation = if (selectedBehaviorTab == idx) 2.dp else 0.dp
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(vertical = 10.dp),
+                                            horizontalArrangement = Arrangement.Center,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(icon, fontSize = 14.sp)
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                label, fontSize = 13.sp,
+                                                color = if (selectedBehaviorTab == idx) Color(0xFF1F2937) else Color(0xFF6B7280)
+                                            )
                                         }
                                     }
                                 }
-                                localDominantEmotion?.let { emotion ->
-                                    val emoji = EMOTION_EMOJIS[emotion] ?: "😐"
-                                    Text("$emoji Dominant emotion: ${emotion.replaceFirstChar { it.uppercase() }}",
-                                        color = Color(0xFF374151), fontSize = 12.sp)
-                                }
-                            } else if (noTbatsInsights) {
-                                Text("No events analyzed yet — messages will appear here once sent.", color = Color(0xFF9CA3AF), fontSize = 12.sp)
+                            }
+
+                            Spacer(Modifier.height(16.dp))
+
+                            when (selectedBehaviorTab) {
+                                0 -> AppUsageAnomaliesSection(
+                                    enoughData    = appAnomalyEnoughData,
+                                    daysCollected = appAnomalyDaysCollected,
+                                    anomalies     = appCategoryAnomalies
+                                )
+                                else -> MusicEmotionAnomaliesSection(
+                                    enoughData    = musicAnomalyEnoughData,
+                                    daysCollected = musicAnomalyDaysCollected,
+                                    anomalies     = musicEmotionAnomalies
+                                )
                             }
                         }
                     }
@@ -1295,7 +1276,7 @@ fun RiskAlertsCard(
         }
     }
 }
-fun loadTbatsAnalysis(context: android.content.Context, childId: String, onResult: (Map<String, Any>) -> Unit) {
+fun loadTbatsAnalysis(context: android.content.Context, childId: String, onResult: (TbatsAnalysisResult) -> Unit) {
     GlobalScope.launch {
         val auth = FirebaseAuth.getInstance()
         val idToken = try {
@@ -1306,7 +1287,7 @@ fun loadTbatsAnalysis(context: android.content.Context, childId: String, onResul
 
         val client = OkHttpClient.Builder()
             .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
             .build()
 
         // Step 1: trigger music emotion classification before TBATS reads the results.
@@ -1350,18 +1331,11 @@ fun loadTbatsAnalysis(context: android.content.Context, childId: String, onResul
                 val dataNoteM    = musicAnalysis.optString("data_note", "")
 
                 val musicInsight = when {
-                    musicConcern == "HIGH" ->
-                        "🎵 Unusual music mood patterns detected"
-                    musicConcern == "MEDIUM" ->
-                        "🎵 Slight changes in music preferences"
-                    hasMusicData && moodDesc.isNotEmpty() ->
-                        "🎵 Mood: $moodDesc ($trackCount tracks)"
-                    musicAnalysis.has("current_score") && !musicAnalysis.has("error") ->
-                        "🎵 Score: ${String.format("%.2f", musicAnalysis.optDouble("current_score"))}" +
-                        if (dataNoteM.isNotEmpty()) " — $dataNoteM" else ""
-                    dataNoteM.isNotEmpty() ->
-                        "🎵 $dataNoteM"
-                    else -> "🎵 No music data yet"
+                    musicConcern == "HIGH"   -> "🎵 Unusual music mood patterns detected"
+                    musicConcern == "MEDIUM" -> "🎵 Slight changes in music preferences"
+                    hasMusicData && moodDesc.isNotEmpty() -> "🎵 Mood: $moodDesc ($trackCount tracks)"
+                    dataNoteM.isNotEmpty()   -> "🎵 $dataNoteM"
+                    else                     -> "🎵 No music data yet"
                 }
 
                 val usageConcern = usageAnalysis.optString("concern_level", "LOW")
@@ -1369,43 +1343,77 @@ fun loadTbatsAnalysis(context: android.content.Context, childId: String, onResul
                 val usageDays    = usageAnalysis.optInt("data_points", 0)
 
                 val usageInsight = when {
-                    usageConcern == "HIGH" ->
-                        "📱 Significant screen time changes detected"
-                    usageConcern == "MEDIUM" ->
-                        "📱 Slight increase in screen time"
-                    usageAnalysis.has("current_score") && !usageAnalysis.has("error") ->
-                        "📱 Score: ${String.format("%.2f", usageAnalysis.optDouble("current_score"))}" +
-                        if (usageDays > 0) " ($usageDays days)" else "" +
-                        if (dataNoteU.isNotEmpty()) " — $dataNoteU" else ""
-                    dataNoteU.isNotEmpty() ->
-                        "📱 $dataNoteU"
-                    else -> "📱 No app usage data yet"
+                    usageConcern == "HIGH"   -> "📱 Significant screen time changes detected"
+                    usageConcern == "MEDIUM" -> "📱 Slight increase in screen time"
+                    usageDays > 0            -> "📱 $usageDays days tracked"
+                    dataNoteU.isNotEmpty()   -> "📱 $dataNoteU"
+                    else                     -> "📱 No app usage data yet"
                 }
 
-                // FIXED: Use proper mapOf with Pair syntax
-                val resultMap: Map<String, Any> = mapOf(
-                    Pair("concern_level", concernLevel),
-                    Pair("music_insight", musicInsight),
-                    Pair("usage_insight", usageInsight),
-                    Pair("anomaly_dates", musicAnalysis.optJSONArray("anomaly_dates")?.length() ?: 0),
-                    Pair("negative_drift_dates", musicAnalysis.optJSONArray("negative_drift_dates")?.length() ?: 0)
-                )
-                onResult(resultMap)
+                // --- Parse app category anomalies ---
+                val appCatJson     = json.optJSONObject("app_category_analysis") ?: JSONObject()
+                val appEnoughData  = appCatJson.optBoolean("has_enough_data", false)
+                val appDaysCollected = appCatJson.optInt("days_collected", 0)
+                val appCategoryAnomalies = mutableListOf<CategoryAnomalyData>()
+                if (appEnoughData) {
+                    val cats = appCatJson.optJSONObject("categories") ?: JSONObject()
+                    cats.keys().forEach { cat ->
+                        val catObj = cats.optJSONObject(cat) ?: return@forEach
+                        appCategoryAnomalies.add(
+                            CategoryAnomalyData(
+                                category   = cat,
+                                enoughData = catObj.optBoolean("enough_data", true),
+                                isAnomaly  = catObj.optBoolean("is_anomaly_today", false),
+                                actual     = catObj.optDouble("actual", 0.0).toFloat(),
+                                forecast   = catObj.optDouble("forecast", 0.0).toFloat(),
+                                direction  = catObj.optString("anomaly_direction", "normal")
+                            )
+                        )
+                    }
+                }
+
+                // --- Parse music emotion anomalies ---
+                val musicEmJson      = json.optJSONObject("music_emotion_analysis") ?: JSONObject()
+                val musicEnoughData  = musicEmJson.optBoolean("has_enough_data", false)
+                val musicDaysCollected = musicEmJson.optInt("days_collected", 0)
+                val musicEmotionAnomalies = mutableListOf<EmotionAnomalyData>()
+                if (musicEnoughData) {
+                    val emotions = musicEmJson.optJSONObject("emotions") ?: JSONObject()
+                    emotions.keys().forEach { emotion ->
+                        val emObj = emotions.optJSONObject(emotion) ?: return@forEach
+                        musicEmotionAnomalies.add(
+                            EmotionAnomalyData(
+                                emotion    = emotion,
+                                enoughData = emObj.optBoolean("enough_data", true),
+                                isAnomaly  = emObj.optBoolean("is_anomaly_today", false),
+                                actual     = emObj.optDouble("actual", 0.0).toFloat(),
+                                forecast   = emObj.optDouble("forecast", 0.0).toFloat(),
+                                direction  = emObj.optString("anomaly_direction", "normal")
+                            )
+                        )
+                    }
+                }
+
+                onResult(TbatsAnalysisResult(
+                    concernLevel          = concernLevel,
+                    musicInsight          = musicInsight,
+                    usageInsight          = usageInsight,
+                    appEnoughData         = appEnoughData,
+                    appDaysCollected      = appDaysCollected,
+                    appCategoryAnomalies  = appCategoryAnomalies,
+                    musicEnoughData       = musicEnoughData,
+                    musicDaysCollected    = musicDaysCollected,
+                    musicEmotionAnomalies = musicEmotionAnomalies
+                ))
             } else {
                 Log.e("TBATS", "Error: ${response.code}")
-                onResult(mapOf(
-                    Pair("concern_level", "LOW"),
-                    Pair("music_insight", "⚠️ Could not load behavioral analysis"),
-                    Pair("usage_insight", "")
-                ))
+                onResult(TbatsAnalysisResult("LOW", "⚠️ Could not load behavioral analysis",
+                    "", false, 0, emptyList(), false, 0, emptyList()))
             }
         } catch (e: Exception) {
             Log.e("TBATS", "Exception: ${e.message}")
-            onResult(mapOf(
-                Pair("concern_level", "LOW"),
-                Pair("music_insight", "⚠️ Behavioral analysis unavailable"),
-                Pair("usage_insight", "")
-            ))
+            onResult(TbatsAnalysisResult("LOW", "⚠️ Behavioral analysis unavailable",
+                "", false, 0, emptyList(), false, 0, emptyList()))
         }
     }
 }
@@ -2020,6 +2028,209 @@ private fun StatChip(label: String, color: Color) {
     Surface(shape = RoundedCornerShape(50), color = color.copy(alpha = 0.12f)) {
         Text(label, color = color, fontSize = 11.sp, fontWeight = FontWeight.Medium,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+    }
+}
+
+// ── Behavioral Pattern Analysis composables ───────────────────────────────────
+
+@Composable
+fun AppUsageAnomaliesSection(
+    enoughData: Boolean?,
+    daysCollected: Int,
+    anomalies: List<CategoryAnomalyData>
+) {
+    when {
+        enoughData == null -> {
+            Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(modifier = Modifier.size(28.dp), color = Color(0xFF6366F1))
+            }
+        }
+        !enoughData -> {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                color = Color(0xFFEEF2FF)
+            ) {
+                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("⏳", fontSize = 22.sp)
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            "Not enough data yet",
+                            fontWeight = FontWeight.SemiBold, color = Color(0xFF3730A3), fontSize = 13.sp
+                        )
+                        Text(
+                            "Collecting app usage patterns ($daysCollected/2 days). Anomaly detection activates once 2 days of data are collected.",
+                            color = Color(0xFF6B7280), fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+        }
+        anomalies.isEmpty() -> {
+            Text("No categorised app usage data yet.", color = Color(0xFF9CA3AF), fontSize = 13.sp)
+        }
+        else -> {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                anomalies.sortedByDescending { it.isAnomaly }.forEach { data ->
+                    AppCategoryAnomalyRow(data)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AppCategoryAnomalyRow(data: CategoryAnomalyData) {
+    val catEmoji = when (data.category.lowercase()) {
+        "social"        -> "💬"
+        "entertainment" -> "🎬"
+        "gaming"        -> "🎮"
+        "productivity"  -> "💼"
+        "education"     -> "📚"
+        "browsing"      -> "🌐"
+        else            -> "📱"
+    }
+    val anomalyColor = when {
+        data.isAnomaly && data.direction == "high" -> Color(0xFFEF4444)
+        data.isAnomaly && data.direction == "low"  -> Color(0xFF3B82F6)
+        else                                        -> Color(0xFF10B981)
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        color = if (data.isAnomaly) anomalyColor.copy(alpha = 0.07f) else Color(0xFFF9FAFB)
+    ) {
+        Row(
+            modifier = Modifier.padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(catEmoji, fontSize = 20.sp)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    data.category.replaceFirstChar { it.uppercase() },
+                    fontWeight = FontWeight.Medium, fontSize = 13.sp, color = Color(0xFF1F2937)
+                )
+                if (!data.enoughData) {
+                    Text("Collecting data for this category", color = Color(0xFF9CA3AF), fontSize = 11.sp)
+                } else {
+                    val actualPct   = (data.actual   * 100).toInt()
+                    val forecastPct = (data.forecast * 100).toInt()
+                    Text("Today: $actualPct% of daily cap · Expected: ~$forecastPct%",
+                        color = Color(0xFF6B7280), fontSize = 11.sp)
+                }
+            }
+            Spacer(Modifier.width(6.dp))
+            if (data.isAnomaly) {
+                Surface(shape = RoundedCornerShape(50), color = anomalyColor.copy(alpha = 0.15f)) {
+                    Text(
+                        if (data.direction == "high") "↑ High" else "↓ Low",
+                        color = anomalyColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            } else if (data.enoughData) {
+                Text("✓", color = Color(0xFF10B981), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+fun MusicEmotionAnomaliesSection(
+    enoughData: Boolean?,
+    daysCollected: Int,
+    anomalies: List<EmotionAnomalyData>
+) {
+    when {
+        enoughData == null -> {
+            Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(modifier = Modifier.size(28.dp), color = Color(0xFF8B5CF6))
+            }
+        }
+        !enoughData -> {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                color = Color(0xFFFAF5FF)
+            ) {
+                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("⏳", fontSize = 22.sp)
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            "Not enough data yet",
+                            fontWeight = FontWeight.SemiBold, color = Color(0xFF6D28D9), fontSize = 13.sp
+                        )
+                        Text(
+                            "Collecting music listening history ($daysCollected/2 days). Emotion anomaly detection activates once 2 days of music data are collected.",
+                            color = Color(0xFF6B7280), fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+        }
+        anomalies.isEmpty() -> {
+            Text("No music emotion data collected yet.", color = Color(0xFF9CA3AF), fontSize = 13.sp)
+        }
+        else -> {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                anomalies.sortedByDescending { it.isAnomaly }.forEach { data ->
+                    MusicEmotionAnomalyRow(data)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MusicEmotionAnomalyRow(data: EmotionAnomalyData) {
+    val emoji = MUSIC_MOOD_EMOJIS[data.emotion] ?: "🎵"
+    val baseColor = MUSIC_MOOD_COLORS[data.emotion] ?: Color(0xFF8B5CF6)
+    val anomalyColor = when {
+        data.isAnomaly && data.direction == "high" -> Color(0xFFEF4444)
+        data.isAnomaly && data.direction == "low"  -> Color(0xFF3B82F6)
+        else                                        -> baseColor
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        color = if (data.isAnomaly) anomalyColor.copy(alpha = 0.07f) else Color(0xFFF9FAFB)
+    ) {
+        Row(
+            modifier = Modifier.padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(emoji, fontSize = 20.sp)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    data.emotion.replaceFirstChar { it.uppercase() },
+                    fontWeight = FontWeight.Medium, fontSize = 13.sp, color = Color(0xFF1F2937)
+                )
+                if (!data.enoughData) {
+                    Text("Collecting data for this emotion", color = Color(0xFF9CA3AF), fontSize = 11.sp)
+                } else {
+                    val actualCount   = data.actual.toInt()
+                    val forecastCount = data.forecast.toInt()
+                    Text("Today: $actualCount plays · Expected: ~$forecastCount",
+                        color = Color(0xFF6B7280), fontSize = 11.sp)
+                }
+            }
+            Spacer(Modifier.width(6.dp))
+            if (data.isAnomaly) {
+                Surface(shape = RoundedCornerShape(50), color = anomalyColor.copy(alpha = 0.15f)) {
+                    Text(
+                        if (data.direction == "high") "↑ More" else "↓ Less",
+                        color = anomalyColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            } else if (data.enoughData) {
+                Text("✓", color = Color(0xFF10B981), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
+        }
     }
 }
 

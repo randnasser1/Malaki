@@ -15,9 +15,11 @@ import androidx.compose.ui.unit.dp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*  // This provides Date, Locale, UUID
 import org.json.JSONArray
@@ -43,7 +45,18 @@ data class WellbeingData(val category: String, val score: Int)
 data class SafetyIndicator(val type: String, val status: String, val description: String)
 data class ChildInfo(val id: String, val name: String)
 data class AppUsageItem(val name: String, val timeMin: Long)
-// Add this near your other data classes (around line 30-40)
+
+data class UrlSafetyAlert(
+    val id: String,
+    val url: String,
+    val domain: String,
+    val riskLevel: String,
+    val blockReasons: List<String>,
+    val confidenceScore: Float,
+    val sourceType: String,
+    val timestamp: Long
+)
+
 data class EmotionDayData(
     val date: String,
     val childLoggedEmotion: String?,
@@ -95,6 +108,9 @@ fun ParentDashboard(
     var alerts by remember { mutableStateOf<List<RiskAlert>>(emptyList()) }
     var isLoadingAlerts by remember { mutableStateOf(true) }
     var isLoadingDashboard by remember { mutableStateOf(true) }
+
+    var urlSafetyAlerts by remember { mutableStateOf<List<UrlSafetyAlert>>(emptyList()) }
+    var isLoadingContentSafety by remember { mutableStateOf(true) }
 
     var children by remember { mutableStateOf<List<ChildInfo>>(emptyList()) }
     var selectedChildId by remember { mutableStateOf<String?>(null) }
@@ -157,6 +173,14 @@ fun ParentDashboard(
             loadAlertsFromFirebase(context, childId) { loadedAlerts ->
                 alerts = loadedAlerts
                 isLoadingAlerts = false
+            }
+
+            // Load URL content safety alerts
+            isLoadingContentSafety = true
+            loadContentSafetyFromFirebase(childId) { loaded ->
+                urlSafetyAlerts = loaded
+                isLoadingContentSafety = false
+                Log.d("DASHBOARD", "Content safety: ${loaded.size} URL alerts")
             }
 
             // LOAD TBATS ANALYSIS (Behavioral Change Detection)
@@ -1037,19 +1061,20 @@ fun ParentDashboard(
                     }
                 }
 
-                // Safety Overview Card
+                // Content Safety Card (URL analysis via RapidAPI)
                 item {
-                    DashboardCard(
-                        title = "Safety Overview",
-                        icon = "⚠️",
-                        iconColor = Color(0xFFEF4444)
-                    ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            safetyIndicators.forEach { indicator ->
-                                SafetyIndicatorRow(indicator)
+                    ContentSafetyCard(
+                        alerts = urlSafetyAlerts,
+                        isLoading = isLoadingContentSafety,
+                        onRefresh = {
+                            val cid = selectedChildId ?: return@ContentSafetyCard
+                            isLoadingContentSafety = true
+                            loadContentSafetyFromFirebase(cid) { loaded ->
+                                urlSafetyAlerts = loaded
+                                isLoadingContentSafety = false
                             }
                         }
-                    }
+                    )
                 }
 
                 // Behavioral Pattern Analysis — two-tab: App Usage Anomalies | Music Emotion Anomalies
@@ -1394,26 +1419,32 @@ fun loadTbatsAnalysis(context: android.content.Context, childId: String, onResul
                     }
                 }
 
-                onResult(TbatsAnalysisResult(
-                    concernLevel          = concernLevel,
-                    musicInsight          = musicInsight,
-                    usageInsight          = usageInsight,
-                    appEnoughData         = appEnoughData,
-                    appDaysCollected      = appDaysCollected,
-                    appCategoryAnomalies  = appCategoryAnomalies,
-                    musicEnoughData       = musicEnoughData,
-                    musicDaysCollected    = musicDaysCollected,
-                    musicEmotionAnomalies = musicEmotionAnomalies
-                ))
+                withContext(Dispatchers.Main) {
+                    onResult(TbatsAnalysisResult(
+                        concernLevel          = concernLevel,
+                        musicInsight          = musicInsight,
+                        usageInsight          = usageInsight,
+                        appEnoughData         = appEnoughData,
+                        appDaysCollected      = appDaysCollected,
+                        appCategoryAnomalies  = appCategoryAnomalies,
+                        musicEnoughData       = musicEnoughData,
+                        musicDaysCollected    = musicDaysCollected,
+                        musicEmotionAnomalies = musicEmotionAnomalies
+                    ))
+                }
             } else {
                 Log.e("TBATS", "Error: ${response.code}")
-                onResult(TbatsAnalysisResult("LOW", "⚠️ Could not load behavioral analysis",
-                    "", false, 0, emptyList(), false, 0, emptyList()))
+                withContext(Dispatchers.Main) {
+                    onResult(TbatsAnalysisResult("LOW", "⚠️ Could not load behavioral analysis",
+                        "", false, 0, emptyList(), false, 0, emptyList()))
+                }
             }
         } catch (e: Exception) {
             Log.e("TBATS", "Exception: ${e.message}")
-            onResult(TbatsAnalysisResult("LOW", "⚠️ Behavioral analysis unavailable",
-                "", false, 0, emptyList(), false, 0, emptyList()))
+            withContext(Dispatchers.Main) {
+                onResult(TbatsAnalysisResult("LOW", "⚠️ Behavioral analysis unavailable",
+                    "", false, 0, emptyList(), false, 0, emptyList()))
+            }
         }
     }
 }
@@ -1729,11 +1760,15 @@ fun loadDashboardDataFromFirebase(
             }
             // ========== END MUSIC INSIGHTS ==========
 
-            onResult(sentiments, wellbeing, safety, musicMap, usageMap, topAppsList)
+            withContext(Dispatchers.Main) {
+                onResult(sentiments, wellbeing, safety, musicMap, usageMap, topAppsList)
+            }
 
         } catch (e: Exception) {
             android.util.Log.e("DASHBOARD", "Error: ${e.message}", e)
-            onResult(emptyList(), emptyList(), emptyList(), emptyMap(), emptyMap(), emptyList())
+            withContext(Dispatchers.Main) {
+                onResult(emptyList(), emptyList(), emptyList(), emptyMap(), emptyMap(), emptyList())
+            }
         }
     }
 }
@@ -1776,9 +1811,9 @@ fun loadAlertsFromFirebase(
                 )
             }
 
-            onResult(alerts)
+            withContext(Dispatchers.Main) { onResult(alerts) }
         } catch (e: Exception) {
-            loadAlertsFromLocalStorage(context, onResult)
+            withContext(Dispatchers.Main) { loadAlertsFromLocalStorage(context, onResult) }
         }
     }
 }
@@ -2497,6 +2532,314 @@ fun SafetyIndicatorRow(indicator: SafetyIndicator) {
                 color = Color(0xFF6B7280),
                 fontSize = 11.sp
             )
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CONTENT SAFETY — URL analysis via RapidAPI ai-text-moderation
+// ══════════════════════════════════════════════════════════════════════════════
+
+fun loadContentSafetyFromFirebase(
+    childId: String,
+    onResult: (List<UrlSafetyAlert>) -> Unit
+) {
+    GlobalScope.launch {
+        try {
+            val cutoff = System.currentTimeMillis() - 7 * 24 * 60 * 60 * 1000L
+            Log.d("CONTENT_SAFETY", "Querying url_safety for childId=$childId cutoff=$cutoff")
+
+            val docs = FirebaseFirestore.getInstance()
+                .collection("url_safety")
+                .whereEqualTo("childId", childId)
+                .limit(50)
+                .get()
+                .await()
+
+            Log.d("CONTENT_SAFETY", "Got ${docs.size()} url_safety docs")
+
+            val alerts = docs.documents.mapNotNull { doc ->
+                val ts = doc.getLong("timestamp") ?: 0L
+                if (ts < cutoff) return@mapNotNull null
+
+                val riskLevel = doc.getString("riskLevel") ?: return@mapNotNull null
+                if (riskLevel == "SAFE" || riskLevel == "PENDING") return@mapNotNull null
+
+                @Suppress("UNCHECKED_CAST")
+                val blockReasons = (doc.get("blockReasons") as? List<String>) ?: emptyList()
+                val url = doc.getString("url") ?: ""
+                val domain = doc.getString("domain") ?: url
+
+                Log.d("CONTENT_SAFETY", "Alert: domain=$domain level=$riskLevel reasons=$blockReasons")
+
+                UrlSafetyAlert(
+                    id             = doc.id,
+                    url            = url,
+                    domain         = domain,
+                    riskLevel      = riskLevel,
+                    blockReasons   = blockReasons,
+                    confidenceScore = (doc.getDouble("confidenceScore") ?: 0.0).toFloat(),
+                    sourceType     = doc.getString("sourceType") ?: "UNKNOWN",
+                    timestamp      = ts
+                )
+            }.sortedByDescending { it.timestamp }
+
+            Log.d("CONTENT_SAFETY", "Returning ${alerts.size} URL safety alerts")
+            withContext(Dispatchers.Main) { onResult(alerts) }
+        } catch (e: Exception) {
+            Log.e("CONTENT_SAFETY", "loadContentSafetyFromFirebase FAILED: ${e.message}", e)
+            withContext(Dispatchers.Main) { onResult(emptyList()) }
+        }
+    }
+}
+
+private val CATEGORY_EXPLANATIONS = mapOf(
+    "Self-harm content"              to "Content that promotes or provides methods for self-harm or suicide.",
+    "Violent or threatening content" to "Threats, graphic violence, or content inciting harm to others.",
+    "Adult/sexual content"           to "Sexually explicit material not appropriate for children.",
+    "Hate speech"                    to "Content attacking people based on race, religion, gender, or other identity."
+)
+
+@Composable
+fun ContentSafetyCard(
+    alerts: List<UrlSafetyAlert>,
+    isLoading: Boolean,
+    onRefresh: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFFEF4444).copy(alpha = 0.1f),
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("🔒", fontSize = 20.sp)
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "Content Safety",
+                            color = Color(0xFF1F2937),
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 16.sp
+                        )
+                        Text(
+                            text = "URL analysis · last 7 days",
+                            color = Color(0xFF9CA3AF),
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+                IconButton(onClick = onRefresh) {
+                    Text("🔄", fontSize = 18.sp)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            when {
+                isLoading -> {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(
+                            color = Color(0xFF3B82F6),
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                }
+                alerts.isEmpty() -> {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("✅", fontSize = 32.sp)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "No unsafe URLs detected",
+                                color = Color(0xFF10B981),
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 14.sp
+                            )
+                            Text(
+                                text = "All analyzed links were safe",
+                                color = Color(0xFF9CA3AF),
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+                else -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        alerts.take(5).forEach { alert ->
+                            UrlSafetyAlertRow(alert = alert)
+                        }
+                        if (alerts.size > 5) {
+                            Text(
+                                text = "+ ${alerts.size - 5} more flagged URLs",
+                                color = Color(0xFF6B7280),
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun UrlSafetyAlertRow(alert: UrlSafetyAlert) {
+    val statusColor = when (alert.riskLevel) {
+        "CRITICAL" -> Color(0xFFDC2626)
+        "HIGH"     -> Color(0xFFEF4444)
+        "MEDIUM"   -> Color(0xFFF59E0B)
+        else       -> Color(0xFF6B7280)
+    }
+    val formattedTime = remember(alert.timestamp) {
+        SimpleDateFormat("HH:mm · MMM d", Locale.getDefault()).format(Date(alert.timestamp))
+    }
+    val sourceLabel = when (alert.sourceType) {
+        "BROWSER" -> "Browser"
+        "MESSAGE" -> "In message"
+        else      -> alert.sourceType
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = statusColor.copy(alpha = 0.05f),
+        border = androidx.compose.foundation.BorderStroke(1.dp, statusColor.copy(alpha = 0.25f))
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            // Risk badge + source + time
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .background(statusColor, RoundedCornerShape(4.dp))
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = statusColor.copy(alpha = 0.15f)
+                    ) {
+                        Text(
+                            text = alert.riskLevel,
+                            color = statusColor,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = Color(0xFF6B7280).copy(alpha = 0.1f)
+                    ) {
+                        Text(
+                            text = sourceLabel,
+                            color = Color(0xFF6B7280),
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                Text(text = formattedTime, color = Color(0xFF9CA3AF), fontSize = 10.sp)
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Domain / URL
+            Text(
+                text = alert.domain.ifBlank { alert.url.take(60) },
+                color = Color(0xFF1F2937),
+                fontWeight = FontWeight.Medium,
+                fontSize = 13.sp
+            )
+            if (alert.url.isNotBlank() && alert.url != alert.domain) {
+                Text(
+                    text = alert.url.take(80) + if (alert.url.length > 80) "…" else "",
+                    color = Color(0xFF9CA3AF),
+                    fontSize = 10.sp
+                )
+            }
+
+            // Flagged categories with explanations
+            if (alert.blockReasons.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                alert.blockReasons.forEach { reason ->
+                    val explanation = CATEGORY_EXPLANATIONS[reason]
+                    Column(modifier = Modifier.padding(bottom = 6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("⚠️", fontSize = 11.sp)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = reason,
+                                color = statusColor,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 12.sp
+                            )
+                        }
+                        if (explanation != null) {
+                            Text(
+                                text = explanation,
+                                color = Color(0xFF6B7280),
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(start = 20.dp, top = 2.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Confidence bar
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(text = "Confidence:", color = Color(0xFF9CA3AF), fontSize = 10.sp)
+                Spacer(modifier = Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(4.dp)
+                        .background(Color(0xFFE5E7EB), RoundedCornerShape(2.dp))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(fraction = alert.confidenceScore.coerceIn(0f, 1f))
+                            .fillMaxHeight()
+                            .background(statusColor, RoundedCornerShape(2.dp))
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "${"%.0f".format(alert.confidenceScore * 100)}%",
+                    color = statusColor,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
         }
     }
 }

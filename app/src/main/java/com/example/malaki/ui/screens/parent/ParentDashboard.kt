@@ -1345,6 +1345,13 @@ fun loadTbatsAnalysis(context: android.content.Context, childId: String, onResul
             if (response.isSuccessful) {
                 val json = JSONObject(response.body?.string() ?: "{}")
 
+                // Backend returns status="computing" on first run — analysis is running
+                // in the background. Keep the spinner state by not calling onResult.
+                if (json.optString("status") == "computing") {
+                    Log.i("TBATS", "Analysis computing in background — keeping spinner")
+                    return@launch
+                }
+
                 val musicAnalysis = json.optJSONObject("music_analysis") ?: JSONObject()
                 val usageAnalysis = json.optJSONObject("usage_analysis") ?: JSONObject()
                 val concernLevel = json.optString("concern_level", "LOW")
@@ -2091,11 +2098,12 @@ fun AppUsageAnomaliesSection(
                     Spacer(Modifier.width(10.dp))
                     Column {
                         Text(
-                            "Not enough data yet",
+                            if (daysCollected == 0) "Preparing analysis" else "Not enough data yet",
                             fontWeight = FontWeight.SemiBold, color = Color(0xFF3730A3), fontSize = 13.sp
                         )
                         Text(
-                            "Collecting app usage patterns ($daysCollected/2 days). Anomaly detection activates once 2 days of data are collected.",
+                            if (daysCollected == 0) "App usage analysis is being prepared. Check back shortly."
+                            else "Collecting app usage patterns ($daysCollected/2 days). Anomaly detection activates once 2 days of data are collected.",
                             color = Color(0xFF6B7280), fontSize = 11.sp
                         )
                     }
@@ -2195,11 +2203,12 @@ fun MusicEmotionAnomaliesSection(
                     Spacer(Modifier.width(10.dp))
                     Column {
                         Text(
-                            "Not enough data yet",
+                            if (daysCollected == 0) "Preparing analysis" else "Not enough data yet",
                             fontWeight = FontWeight.SemiBold, color = Color(0xFF6D28D9), fontSize = 13.sp
                         )
                         Text(
-                            "Collecting music listening history ($daysCollected/2 days). Emotion anomaly detection activates once 2 days of music data are collected.",
+                            if (daysCollected == 0) "Music emotion analysis is being prepared. Check back shortly."
+                            else "Collecting music listening history ($daysCollected/2 days). Emotion anomaly detection activates once 2 days of music data are collected.",
                             color = Color(0xFF6B7280), fontSize = 11.sp
                         )
                     }

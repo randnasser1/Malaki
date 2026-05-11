@@ -113,6 +113,7 @@ fun ParentDashboard(
     var musicEmotionAnomalies by remember { mutableStateOf<List<EmotionAnomalyData>>(emptyList()) }
     var musicAnomalyEnoughData by remember { mutableStateOf<Boolean?>(null) }
     var musicAnomalyDaysCollected by remember { mutableStateOf(0) }
+    var groomingProbability by remember { mutableStateOf(0f) }
     // Load children when parent ID changes (sign in/out)
     LaunchedEffect(currentParentId) {
         if (currentParentId.isNotEmpty()) {
@@ -157,6 +158,11 @@ fun ParentDashboard(
             loadAlertsFromFirebase(context, childId) { loadedAlerts ->
                 alerts = loadedAlerts
                 isLoadingAlerts = false
+                triggerAlertNotificationIfNeeded(context, loadedAlerts)
+            }
+
+            loadGroomingProbabilityFromFirebase(childId) { prob ->
+                groomingProbability = prob
             }
 
             // LOAD TBATS ANALYSIS (Behavioral Change Detection)
@@ -357,6 +363,15 @@ fun ParentDashboard(
                 }
             } else {
 
+                // Status banner
+                item {
+                    ChildStatusBanner(
+                        alerts = alerts,
+                        tbatsConcernLevel = tbatsConcernLevel,
+                        sentimentData = sentimentData,
+                        groomingProbability = groomingProbability
+                    )
+                }
 
 // Wellbeing Indicators Card (Tabbed: Journal Emotions vs Daily Mood Calendar)
                 item {
@@ -1160,6 +1175,158 @@ fun ParentDashboard(
         }
     }
 }
+fun loadGroomingProbabilityFromFirebase(childId: String, onResult: (Float) -> Unit) {
+    GlobalScope.launch {
+        try {
+            val firestore = FirebaseFirestore.getInstance()
+            val thirtyDaysAgo = System.currentTimeMillis() - (30 * 24 * 60 * 60 * 1000L)
+            val docs = firestore.collection("event_analysis")
+                .whereEqualTo("childId", childId)
+                .orderBy("analyzedAt", Query.Direction.DESCENDING)
+                .limit(30)
+                .get()
+                .await()
+            val probs = docs.documents.mapNotNull { doc ->
+                val analyzedAt = doc.getLong("analyzedAt") ?: 0L
+                if (analyzedAt < thirtyDaysAgo) return@mapNotNull null
+                (doc.getDouble("groomingProbability") ?: doc.getDouble("riskScore"))?.toFloat()
+            }
+            onResult(if (probs.isEmpty()) 0f else probs.average().toFloat())
+        } catch (e: Exception) {
+            onResult(0f)
+        }
+    }
+}
+
+fun triggerAlertNotificationIfNeeded(context: android.content.Context, alerts: List<RiskAlert>) {
+    val highAlerts = alerts.filter { it.riskLevel in listOf("HIGH", "CRITICAL") }
+    if (highAlerts.isEmpty()) return
+    try {
+        val nm = context.getSystemService(android.content.Context.NOTIFICATION_SERVICE)
+            as android.app.NotificationManager
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val ch = android.app.NotificationChannel(
+                "risk_alerts_parent", "Child Safety Alerts",
+                android.app.NotificationManager.IMPORTANCE_HIGH
+            ).apply { enableVibration(true); vibrationPattern = longArrayOf(0, 500, 300, 500) }
+            nm.createNotificationChannel(ch)
+        }
+        val top = highAlerts.first()
+        val title = if (top.riskLevel == "CRITICAL") "🚨 Critical Safety Alert" else "⚠️ High Risk Alert"
+        val body = when (top.threatType) {
+            "confirmed_predator" -> "An adult with predatory behavior contacted your child."
+            "peer_predatory"     -> "A peer is showing predatory behavior — review needed."
+            else                 -> "Suspicious activity detected. Open the app to review."
+        }
+        val notif = androidx.core.app.NotificationCompat.Builder(context, "risk_alerts_parent")
+            .setContentTitle(title)
+            .setContentText(body)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setColor(if (top.riskLevel == "CRITICAL") 0xFFDC2626.toInt() else 0xFFF59E0B.toInt())
+            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setVibrate(longArrayOf(0, 500, 300, 500))
+            .build()
+        nm.notify("dashboard_alerts".hashCode(), notif)
+    } catch (e: Exception) {
+        Log.e("NOTIF", "Failed to show alert notification: ${e.message}")
+    }
+}
+
+@Composable
+fun ChildStatusBanner(
+    alerts: List<RiskAlert>,
+    tbatsConcernLevel: String,
+    sentimentData: List<SentimentData>,
+    groomingProbability: Float
+) {
+    val hasHighAlert = alerts.any { it.riskLevel in listOf("HIGH", "CRITICAL") }
+    val nonZeroScores = sentimentData.filter { it.score > 0 }
+    val avgSentiment = if (nonZeroScores.isEmpty()) -1
+                       else nonZeroScores.map { it.score }.average().toInt()
+
+    val bannerColor: Color
+    val statusIcon: String
+    val statusTitle: String
+    val statusBody: String
+
+    when {
+        hasHighAlert || tbatsConcernLevel == "HIGH" -> {
+            bannerColor = Color(0xFFEF4444)
+            statusIcon  = "🚨"
+            statusTitle = "Needs Immediate Attention"
+            statusBody  = "High-risk activity has been detected. Review the alerts below."
+        }
+        tbatsConcernLevel == "MEDIUM" || groomingProbability > 0.35f -> {
+            bannerColor = Color(0xFFF59E0B)
+            statusIcon  = "⚠️"
+            statusTitle = "Some Concerns Detected"
+            statusBody  = "Unusual patterns were noticed. Keep an eye on recent activity."
+        }
+        else -> {
+            bannerColor = Color(0xFF10B981)
+            statusIcon  = "✅"
+            statusTitle = "Your Child Is Safe"
+            statusBody  = when {
+                avgSentiment < 0   -> "No concerning activity detected."
+                avgSentiment >= 65 -> "Behavior looks normal and mood appears positive."
+                avgSentiment >= 40 -> "Behavior looks normal and mood is neutral."
+                else               -> "Behavior looks normal. Mood is slightly low — keep an eye on it."
+            }
+        }
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = bannerColor.copy(alpha = 0.1f),
+        border = androidx.compose.foundation.BorderStroke(1.5.dp, bannerColor.copy(alpha = 0.3f))
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(statusIcon, fontSize = 32.sp)
+            Spacer(modifier = Modifier.width(12.dp))
+            Column {
+                Text(
+                    text = statusTitle,
+                    color = bannerColor,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+                Text(
+                    text = statusBody,
+                    color = Color(0xFF4B5563),
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+                if (groomingProbability > 0f) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Grooming risk score: ",
+                            color = Color(0xFF6B7280),
+                            fontSize = 11.sp
+                        )
+                        val gpColor = when {
+                            groomingProbability >= 0.65f -> Color(0xFFEF4444)
+                            groomingProbability >= 0.35f -> Color(0xFFF59E0B)
+                            else                         -> Color(0xFF10B981)
+                        }
+                        Text(
+                            "${(groomingProbability * 100).toInt()}%",
+                            color = gpColor,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ========== NEW COMPOSABLES FOR RISK ALERTS ==========
 
 data class RiskAlert(
@@ -1172,7 +1339,8 @@ data class RiskAlert(
     val messageText: String = "",
     val authorLabel: String = "Unknown",
     val threatType: String = "unknown",
-    val explainabilityText: String = ""
+    val explainabilityText: String = "",
+    val groomingProbability: Float = 0f
 )
 
 @Composable
@@ -1323,98 +1491,79 @@ fun loadTbatsAnalysis(context: android.content.Context, childId: String, onResul
             if (response.isSuccessful) {
                 val json = JSONObject(response.body?.string() ?: "{}")
 
-                // Backend returns status="computing" on first run — analysis is running
-                // in the background. Keep the spinner state by not calling onResult.
-                if (json.optString("status") == "computing") {
-                    Log.i("TBATS", "Analysis computing in background — keeping spinner")
-                    return@launch
-                }
-
-                val musicAnalysis = json.optJSONObject("music_analysis") ?: JSONObject()
-                val usageAnalysis = json.optJSONObject("usage_analysis") ?: JSONObject()
-                val concernLevel = json.optString("concern_level", "LOW")
-
-                val musicConcern = musicAnalysis.optString("concern_level", "LOW")
-                val hasMusicData = musicAnalysis.optBoolean("has_music_data", false)
-                val moodDesc     = musicAnalysis.optString("mood_description", "")
-                val trackCount   = musicAnalysis.optInt("total_tracks", 0)
-                val dataNoteM    = musicAnalysis.optString("data_note", "")
-
-                val musicInsight = when {
-                    musicConcern == "HIGH"   -> "🎵 Unusual music mood patterns detected"
-                    musicConcern == "MEDIUM" -> "🎵 Slight changes in music preferences"
-                    hasMusicData && moodDesc.isNotEmpty() -> "🎵 Mood: $moodDesc ($trackCount tracks)"
-                    dataNoteM.isNotEmpty()   -> "🎵 $dataNoteM"
-                    else                     -> "🎵 No music data yet"
-                }
-
-                val usageConcern = usageAnalysis.optString("concern_level", "LOW")
-                val dataNoteU    = usageAnalysis.optString("data_note", "")
-                val usageDays    = usageAnalysis.optInt("data_points", 0)
-
-                val usageInsight = when {
-                    usageConcern == "HIGH"   -> "📱 Significant screen time changes detected"
-                    usageConcern == "MEDIUM" -> "📱 Slight increase in screen time"
-                    usageDays > 0            -> "📱 $usageDays days tracked"
-                    dataNoteU.isNotEmpty()   -> "📱 $dataNoteU"
-                    else                     -> "📱 No app usage data yet"
-                }
-
-                // --- Parse app category anomalies ---
-                val appCatJson     = json.optJSONObject("app_category_analysis") ?: JSONObject()
-                val appEnoughData  = appCatJson.optBoolean("has_enough_data", false)
-                val appDaysCollected = appCatJson.optInt("days_collected", 0)
-                val appCategoryAnomalies = mutableListOf<CategoryAnomalyData>()
-                if (appEnoughData) {
-                    val cats = appCatJson.optJSONObject("categories") ?: JSONObject()
-                    cats.keys().forEach { cat ->
-                        val catObj = cats.optJSONObject(cat) ?: return@forEach
-                        appCategoryAnomalies.add(
-                            CategoryAnomalyData(
+                fun parseJson(j: JSONObject): TbatsAnalysisResult {
+                    val musicAnalysis = j.optJSONObject("music_analysis") ?: JSONObject()
+                    val usageAnalysis = j.optJSONObject("usage_analysis") ?: JSONObject()
+                    val concernLevel  = j.optString("concern_level", "LOW")
+                    val musicConcern  = musicAnalysis.optString("concern_level", "LOW")
+                    val hasMusicData  = musicAnalysis.optBoolean("has_music_data", false)
+                    val moodDesc      = musicAnalysis.optString("mood_description", "")
+                    val trackCount    = musicAnalysis.optInt("total_tracks", 0)
+                    val dataNoteM     = musicAnalysis.optString("data_note", "")
+                    val musicInsight  = when {
+                        musicConcern == "HIGH"   -> "🎵 Unusual music mood patterns detected"
+                        musicConcern == "MEDIUM" -> "🎵 Slight changes in music preferences"
+                        hasMusicData && moodDesc.isNotEmpty() -> "🎵 Mood: $moodDesc ($trackCount tracks)"
+                        dataNoteM.isNotEmpty()   -> "🎵 $dataNoteM"
+                        else                     -> "🎵 No music data yet"
+                    }
+                    val usageConcern = usageAnalysis.optString("concern_level", "LOW")
+                    val dataNoteU    = usageAnalysis.optString("data_note", "")
+                    val usageDays    = usageAnalysis.optInt("data_points", 0)
+                    val usageInsight = when {
+                        usageConcern == "HIGH"   -> "📱 Significant screen time changes detected"
+                        usageConcern == "MEDIUM" -> "📱 Slight increase in screen time"
+                        usageDays > 0            -> "📱 $usageDays days tracked"
+                        dataNoteU.isNotEmpty()   -> "📱 $dataNoteU"
+                        else                     -> "📱 No app usage data yet"
+                    }
+                    val appCatJson          = j.optJSONObject("app_category_analysis") ?: JSONObject()
+                    val appEnoughData       = appCatJson.optBoolean("has_enough_data", false)
+                    val appDaysCollected    = appCatJson.optInt("days_collected", 0)
+                    val appCategoryAnomalies = mutableListOf<CategoryAnomalyData>()
+                    if (appEnoughData) {
+                        val cats = appCatJson.optJSONObject("categories") ?: JSONObject()
+                        cats.keys().forEach { cat ->
+                            val catObj = cats.optJSONObject(cat) ?: return@forEach
+                            appCategoryAnomalies.add(CategoryAnomalyData(
                                 category   = cat,
                                 enoughData = catObj.optBoolean("enough_data", true),
                                 isAnomaly  = catObj.optBoolean("is_anomaly_today", false),
                                 actual     = catObj.optDouble("actual", 0.0).toFloat(),
                                 forecast   = catObj.optDouble("forecast", 0.0).toFloat(),
                                 direction  = catObj.optString("anomaly_direction", "normal")
-                            )
-                        )
+                            ))
+                        }
                     }
-                }
-
-                // --- Parse music emotion anomalies ---
-                val musicEmJson      = json.optJSONObject("music_emotion_analysis") ?: JSONObject()
-                val musicEnoughData  = musicEmJson.optBoolean("has_enough_data", false)
-                val musicDaysCollected = musicEmJson.optInt("days_collected", 0)
-                val musicEmotionAnomalies = mutableListOf<EmotionAnomalyData>()
-                if (musicEnoughData) {
-                    val emotions = musicEmJson.optJSONObject("emotions") ?: JSONObject()
-                    emotions.keys().forEach { emotion ->
-                        val emObj = emotions.optJSONObject(emotion) ?: return@forEach
-                        musicEmotionAnomalies.add(
-                            EmotionAnomalyData(
+                    val musicEmJson           = j.optJSONObject("music_emotion_analysis") ?: JSONObject()
+                    val musicEnoughData       = musicEmJson.optBoolean("has_enough_data", false)
+                    val musicDaysCollected    = musicEmJson.optInt("days_collected", 0)
+                    val musicEmotionAnomalies = mutableListOf<EmotionAnomalyData>()
+                    if (musicEnoughData) {
+                        val emotions = musicEmJson.optJSONObject("emotions") ?: JSONObject()
+                        emotions.keys().forEach { emotion ->
+                            val emObj = emotions.optJSONObject(emotion) ?: return@forEach
+                            musicEmotionAnomalies.add(EmotionAnomalyData(
                                 emotion    = emotion,
                                 enoughData = emObj.optBoolean("enough_data", true),
                                 isAnomaly  = emObj.optBoolean("is_anomaly_today", false),
                                 actual     = emObj.optDouble("actual", 0.0).toFloat(),
                                 forecast   = emObj.optDouble("forecast", 0.0).toFloat(),
                                 direction  = emObj.optString("anomaly_direction", "normal")
-                            )
-                        )
+                            ))
+                        }
                     }
+                    return TbatsAnalysisResult(concernLevel, musicInsight, usageInsight,
+                        appEnoughData, appDaysCollected, appCategoryAnomalies,
+                        musicEnoughData, musicDaysCollected, musicEmotionAnomalies)
                 }
 
-                onResult(TbatsAnalysisResult(
-                    concernLevel          = concernLevel,
-                    musicInsight          = musicInsight,
-                    usageInsight          = usageInsight,
-                    appEnoughData         = appEnoughData,
-                    appDaysCollected      = appDaysCollected,
-                    appCategoryAnomalies  = appCategoryAnomalies,
-                    musicEnoughData       = musicEnoughData,
-                    musicDaysCollected    = musicDaysCollected,
-                    musicEmotionAnomalies = musicEmotionAnomalies
-                ))
+                if (json.optString("status") == "computing") {
+                    Log.i("TBATS", "Analysis computing in background — keeping spinner")
+                    return@launch
+                }
+
+                onResult(parseJson(json))
             } else {
                 Log.e("TBATS", "Error: ${response.code}")
                 onResult(TbatsAnalysisResult("LOW", "⚠️ Could not load behavioral analysis",
@@ -1459,6 +1608,21 @@ fun RiskAlertRow(alert: RiskAlert) {
         "risky_peer"              -> "Risky Peer Interaction"
         "suspicious_unknown"      -> "Suspicious – Contact Unknown"
         else                      -> "Risk Detected"
+    }
+
+    // Contextual explainability based on author + threat combination
+    val contextualExplain: String? = when (alert.threatType) {
+        "confirmed_predator" ->
+            "HIGH RISK: An adult is using predatory language with your child. This is a serious threat — review immediately and consider blocking this contact."
+        "peer_predatory" ->
+            "NEEDS INVESTIGATION: Another child is sending messages with grooming patterns. This could be teen grooming or an adult pretending to be a child. Review the conversation carefully."
+        "predatory_unknown_author" ->
+            "Predatory behavior detected from an unknown contact. The sender's age could not be determined — treat as high risk until verified."
+        "suspicious_adult" ->
+            "An adult contact is communicating in ways that raise concern. Monitor this contact closely."
+        "risky_peer" ->
+            "A peer interaction was flagged as potentially risky. Review the conversation to determine if it's harmless or warrants action."
+        else -> null
     }
 
     val formattedTime: String = remember(alert.timestamp) {
@@ -1551,12 +1715,33 @@ fun RiskAlertRow(alert: RiskAlert) {
                 }
             }
 
-            // ── Explainability text ───────────────────────────────────────────
+            // ── Contextual explainability (author+threat aware) ───────────────
+            if (contextualExplain != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                val bannerBg = when (alert.threatType) {
+                    "confirmed_predator", "predatory_unknown_author" -> Color(0xFFEF4444).copy(alpha = 0.08f)
+                    "peer_predatory" -> Color(0xFFF59E0B).copy(alpha = 0.08f)
+                    else -> Color(0xFF6B7280).copy(alpha = 0.06f)
+                }
+                Surface(shape = RoundedCornerShape(8.dp), color = bannerBg) {
+                    Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+                        Text("💡 ", fontSize = 12.sp)
+                        Text(
+                            text = contextualExplain,
+                            color = Color(0xFF1F2937),
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp
+                        )
+                    }
+                }
+            }
+
+            // ── AI model reasoning ────────────────────────────────────────────
             val explain = alert.explainabilityText.ifEmpty {
                 alert.blockReasons.firstOrNull() ?: ""
             }
             if (explain.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
                 Row {
                     Text("🔍 ", fontSize = 11.sp)
                     Text(
@@ -1570,10 +1755,34 @@ fun RiskAlertRow(alert: RiskAlert) {
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // ── Confidence bar ────────────────────────────────────────────────
+            // ── Grooming risk score ───────────────────────────────────────────
+            if (alert.groomingProbability > 0f) {
+                val gpColor = when {
+                    alert.groomingProbability >= 0.65f -> Color(0xFFEF4444)
+                    alert.groomingProbability >= 0.35f -> Color(0xFFF59E0B)
+                    else                               -> Color(0xFF6B7280)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("⚠️ ", fontSize = 11.sp)
+                    Text(
+                        "Your child is ",
+                        color = Color(0xFF4B5563),
+                        fontSize = 11.sp
+                    )
+                    Text(
+                        "${(alert.groomingProbability * 100).toInt()}% at risk of grooming",
+                        color = gpColor,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+
+            // ── Grooming probability bar ──────────────────────────────────────
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "AI Confidence:",
+                    text = "Grooming risk:",
                     color = Color(0xFF9CA3AF),
                     fontSize = 10.sp
                 )
@@ -1586,14 +1795,14 @@ fun RiskAlertRow(alert: RiskAlert) {
                 ) {
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth(fraction = alert.confidenceScore.coerceIn(0f, 1f))
+                            .fillMaxWidth(fraction = alert.groomingProbability.coerceIn(0f, 1f))
                             .fillMaxHeight()
                             .background(statusColor, RoundedCornerShape(2.dp))
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "${(alert.confidenceScore * 100).toInt()}%",
+                    text = "${(alert.groomingProbability * 100).toInt()}%",
                     color = statusColor,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Medium
@@ -1813,31 +2022,35 @@ fun loadAlertsFromFirebase(
     GlobalScope.launch {
         try {
             val firestore = FirebaseFirestore.getInstance()
-            val twentyFourHoursAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
+            val thirtyDaysAgo = System.currentTimeMillis() - (30 * 24 * 60 * 60 * 1000L)
 
-            val assessments = firestore.collection("risk_assessment")
+            val docs = firestore.collection("event_analysis")
                 .whereEqualTo("childId", childId)
+                .orderBy("analyzedAt", Query.Direction.DESCENDING)
                 .limit(100)
                 .get()
                 .await()
 
-            val alerts = assessments.documents.mapNotNull { doc ->
-                val ts = doc.getLong("timestamp") ?: 0L
-                if (ts < twentyFourHoursAgo) return@mapNotNull null
+            val alerts = docs.documents.mapNotNull { doc ->
+                val analyzedAt = doc.getLong("analyzedAt") ?: 0L
+                if (analyzedAt < thirtyDaysAgo) return@mapNotNull null
                 val riskLevel = doc.getString("riskLevel") ?: return@mapNotNull null
                 if (riskLevel !in listOf("MEDIUM", "HIGH", "CRITICAL")) return@mapNotNull null
 
+                val gp          = (doc.getDouble("groomingProbability") ?: doc.getDouble("riskScore") ?: 0.0).toFloat()
                 val authorLabel = doc.getString("authorLabel") ?: "Unknown"
-                val threatType  = doc.getString("threatType") ?: "unknown"
-                val explainText = doc.getString("explainabilityText")
-                    ?: doc.get("blockReasons")?.let {
-                        @Suppress("UNCHECKED_CAST")
-                        (it as? List<String>)?.firstOrNull()
-                    }
+                val threatType  = when {
+                    authorLabel == "Adult" && gp >= 0.65f  -> "confirmed_predator"
+                    authorLabel == "Minor" && gp >= 0.65f  -> "peer_predatory"
+                    authorLabel == "Adult"                  -> "suspicious_adult"
+                    authorLabel == "Minor"                  -> "risky_peer"
+                    gp >= 0.65f                             -> "predatory_unknown_author"
+                    else                                    -> "suspicious_unknown"
+                }
+                val explainText = doc.getString("explanation")
                     ?: when (riskLevel) {
-                        "CRITICAL" -> "Confirmed predatory behavior detected from an adult contact."
-                        "HIGH"     -> "Suspicious or predatory patterns detected. Parental review recommended."
-                        else       -> "Suspicious behavior detected. Monitor this contact."
+                        "HIGH"   -> "High grooming risk detected. Parental review recommended."
+                        else     -> "Suspicious behavior detected. Monitor this contact."
                     }
 
                 RiskAlert(
@@ -1845,14 +2058,15 @@ fun loadAlertsFromFirebase(
                     url = "⚠️ Content flagged",
                     riskLevel = riskLevel,
                     blockReasons = listOf(explainText),
-                    confidenceScore = (doc.getDouble("confidenceScore") ?: 0.7).toFloat(),
-                    timestamp = doc.getLong("timestamp") ?: System.currentTimeMillis(),
-                    messageText = doc.getString("messageText") ?: doc.getString("url") ?: "",
+                    confidenceScore = gp,
+                    timestamp = analyzedAt,
+                    messageText = doc.getString("messageText") ?: "",
                     authorLabel = authorLabel,
                     threatType = threatType,
-                    explainabilityText = explainText
+                    explainabilityText = explainText,
+                    groomingProbability = gp
                 )
-            }
+            }.sortedByDescending { it.timestamp }
 
             onResult(alerts)
         } catch (e: Exception) {
@@ -2150,9 +2364,12 @@ fun AppUsageAnomaliesSection(
             Text("No categorised app usage data yet.", color = Color(0xFF9CA3AF), fontSize = 13.sp)
         }
         else -> {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                anomalies.sortedByDescending { it.isAnomaly }.forEach { data ->
-                    AppCategoryAnomalyRow(data)
+            val readyAnomalies = anomalies.filter { it.enoughData }.sortedByDescending { it.isAnomaly }
+            if (readyAnomalies.isEmpty()) {
+                Text("Collecting data for all categories.", color = Color(0xFF9CA3AF), fontSize = 13.sp)
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    readyAnomalies.forEach { data -> AppCategoryAnomalyRow(data) }
                 }
             }
         }
@@ -2255,9 +2472,12 @@ fun MusicEmotionAnomaliesSection(
             Text("No music emotion data collected yet.", color = Color(0xFF9CA3AF), fontSize = 13.sp)
         }
         else -> {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                anomalies.sortedByDescending { it.isAnomaly }.forEach { data ->
-                    MusicEmotionAnomalyRow(data)
+            val readyAnomalies = anomalies.filter { it.enoughData }.sortedByDescending { it.isAnomaly }
+            if (readyAnomalies.isEmpty()) {
+                Text("Collecting emotion data for all moods.", color = Color(0xFF9CA3AF), fontSize = 13.sp)
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    readyAnomalies.forEach { data -> MusicEmotionAnomalyRow(data) }
                 }
             }
         }

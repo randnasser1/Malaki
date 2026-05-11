@@ -1169,7 +1169,10 @@ data class RiskAlert(
     val blockReasons: List<String>,
     val confidenceScore: Float,
     val timestamp: Long,
-    val messageText: String = ""
+    val messageText: String = "",
+    val authorLabel: String = "Unknown",
+    val threatType: String = "unknown",
+    val explainabilityText: String = ""
 )
 
 @Composable
@@ -1421,9 +1424,34 @@ fun loadTbatsAnalysis(context: android.content.Context, childId: String, onResul
 fun RiskAlertRow(alert: RiskAlert) {
     val statusColor = when (alert.riskLevel) {
         "CRITICAL" -> Color(0xFFDC2626)
-        "HIGH" -> Color(0xFFF59E0B)
-        "MEDIUM" -> Color(0xFFFBBF24)
-        else -> Color(0xFF6B7280)
+        "HIGH"     -> Color(0xFFF59E0B)
+        "MEDIUM"   -> Color(0xFF3B82F6)
+        else       -> Color(0xFF6B7280)
+    }
+
+    val riskIcon = when (alert.riskLevel) {
+        "CRITICAL" -> "🚨"
+        "HIGH"     -> "⚠️"
+        "MEDIUM"   -> "🔶"
+        else       -> "ℹ️"
+    }
+
+    // Author badge appearance
+    val (authorIcon, authorText, authorBadgeColor) = when (alert.authorLabel) {
+        "Adult"  -> Triple("👤", "Adult Contact", Color(0xFFDC2626))
+        "Minor"  -> Triple("🧒", "Peer / Minor",  Color(0xFF8B5CF6))
+        else     -> Triple("❓", "Unknown Contact", Color(0xFF6B7280))
+    }
+
+    // Human-readable threat label
+    val threatLabel = when (alert.threatType) {
+        "confirmed_predator"      -> "Confirmed Predatory Behavior"
+        "peer_predatory"          -> "Predatory Peer Behavior"
+        "predatory_unknown_author"-> "Predatory – Contact Unknown"
+        "suspicious_adult"        -> "Suspicious Adult Contact"
+        "risky_peer"              -> "Risky Peer Interaction"
+        "suspicious_unknown"      -> "Suspicious – Contact Unknown"
+        else                      -> "Risk Detected"
     }
 
     val formattedTime: String = remember(alert.timestamp) {
@@ -1434,27 +1462,31 @@ fun RiskAlertRow(alert: RiskAlert) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
         color = statusColor.copy(alpha = 0.05f),
-        border = androidx.compose.foundation.BorderStroke(1.dp, statusColor.copy(alpha = 0.2f))
+        border = androidx.compose.foundation.BorderStroke(1.dp, statusColor.copy(alpha = 0.25f))
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            // Header row with risk level and time
+
+            // ── Row 1: risk level pill + timestamp ────────────────────────────
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .background(statusColor, RoundedCornerShape(4.dp))
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "${alert.riskLevel} RISK DETECTED",
-                        color = statusColor,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp
-                    )
+                    Text(riskIcon, fontSize = 14.sp)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = statusColor.copy(alpha = 0.15f)
+                    ) {
+                        Text(
+                            text = "${alert.riskLevel} RISK",
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            color = statusColor,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                    }
                 }
                 Text(
                     text = formattedTime,
@@ -1465,47 +1497,76 @@ fun RiskAlertRow(alert: RiskAlert) {
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 🆕 Show the actual message that triggered the alert
+            // ── Row 2: author badge + threat label ────────────────────────────
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = authorBadgeColor.copy(alpha = 0.12f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, authorBadgeColor.copy(alpha = 0.3f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(authorIcon, fontSize = 11.sp)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = authorText,
+                            color = authorBadgeColor,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = threatLabel,
+                    color = Color(0xFF374151),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            // ── Message snippet ───────────────────────────────────────────────
             if (alert.messageText.isNotEmpty()) {
-                Text(
-                    text = "⚠️ ${alert.messageText.take(150)}${if (alert.messageText.length > 150) "..." else ""}",
-                    color = Color(0xFF1F2937),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium
-                )
                 Spacer(modifier = Modifier.height(8.dp))
-            }
-
-            // Show block reasons (grooming reason)
-            if (alert.blockReasons.isNotEmpty()) {
-                alert.blockReasons.take(2).forEach { reason ->
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFFF3F4F6)
+                ) {
                     Text(
-                        text = "🔍 $reason",
-                        color = Color(0xFF6B7280),
-                        fontSize = 11.sp
+                        text = "\"${alert.messageText.take(140)}${if (alert.messageText.length > 140) "…" else ""}\"",
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        color = Color(0xFF374151),
+                        fontSize = 12.sp,
+                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
                     )
                 }
-                if (alert.blockReasons.size > 2) {
-                    Text(
-                        text = "🔍 +${alert.blockReasons.size - 2} more",
-                        color = Color(0xFF9CA3AF),
-                        fontSize = 10.sp
-                    )
-                }
-            } else {
-                Text(
-                    text = "🔍 High grooming probability detected",
-                    color = Color(0xFF6B7280),
-                    fontSize = 11.sp
-                )
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
+            // ── Explainability text ───────────────────────────────────────────
+            val explain = alert.explainabilityText.ifEmpty {
+                alert.blockReasons.firstOrNull() ?: ""
+            }
+            if (explain.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row {
+                    Text("🔍 ", fontSize = 11.sp)
+                    Text(
+                        text = explain,
+                        color = Color(0xFF4B5563),
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
 
-            // Confidence bar
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // ── Confidence bar ────────────────────────────────────────────────
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "Confidence:",
+                    text = "AI Confidence:",
                     color = Color(0xFF9CA3AF),
                     fontSize = 10.sp
                 )
@@ -1518,7 +1579,7 @@ fun RiskAlertRow(alert: RiskAlert) {
                 ) {
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth(fraction = alert.confidenceScore)
+                            .fillMaxWidth(fraction = alert.confidenceScore.coerceIn(0f, 1f))
                             .fillMaxHeight()
                             .background(statusColor, RoundedCornerShape(2.dp))
                     )
@@ -1757,22 +1818,32 @@ fun loadAlertsFromFirebase(
                 val ts = doc.getLong("timestamp") ?: 0L
                 if (ts < twentyFourHoursAgo) return@mapNotNull null
                 val riskLevel = doc.getString("riskLevel") ?: return@mapNotNull null
-                if (riskLevel !in listOf("HIGH", "CRITICAL")) return@mapNotNull null
+                if (riskLevel !in listOf("MEDIUM", "HIGH", "CRITICAL")) return@mapNotNull null
+
+                val authorLabel = doc.getString("authorLabel") ?: "Unknown"
+                val threatType  = doc.getString("threatType") ?: "unknown"
+                val explainText = doc.getString("explainabilityText")
+                    ?: doc.get("blockReasons")?.let {
+                        @Suppress("UNCHECKED_CAST")
+                        (it as? List<String>)?.firstOrNull()
+                    }
+                    ?: when (riskLevel) {
+                        "CRITICAL" -> "Confirmed predatory behavior detected from an adult contact."
+                        "HIGH"     -> "Suspicious or predatory patterns detected. Parental review recommended."
+                        else       -> "Suspicious behavior detected. Monitor this contact."
+                    }
 
                 RiskAlert(
                     id = doc.id,
-                    url = "⚠️ Content blocked",
+                    url = "⚠️ Content flagged",
                     riskLevel = riskLevel,
-                    blockReasons = listOf(
-                        when (riskLevel) {
-                            "CRITICAL" -> "Immediate attention recommended - grooming detected"
-                            "HIGH" -> "Parental review suggested - suspicious pattern"
-                            else -> "Monitor conversation"
-                        }
-                    ),
+                    blockReasons = listOf(explainText),
                     confidenceScore = (doc.getDouble("confidenceScore") ?: 0.7).toFloat(),
                     timestamp = doc.getLong("timestamp") ?: System.currentTimeMillis(),
-                    messageText = doc.getString("messageText") ?: doc.getString("url") ?: ""  // 🆕 Read message
+                    messageText = doc.getString("messageText") ?: doc.getString("url") ?: "",
+                    authorLabel = authorLabel,
+                    threatType = threatType,
+                    explainabilityText = explainText
                 )
             }
 

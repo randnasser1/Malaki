@@ -81,7 +81,8 @@ class BackendSyncManager(context: Context) {
         val recentEvents = unsyncedEvents.filter { it.timestampUtc >= recentCutoff }
 
         if (recentEvents.isEmpty()) {
-            Log.d(TAG, "🔵 No recent events to sync (${unsyncedEvents.size} old stale events ignored)")
+            Log.d(TAG, "🔵 No recent events to sync (${unsyncedEvents.size} old stale events — purging)")
+            repository.purgeOldEvents(retentionDays = 1)
             return true
         }
 

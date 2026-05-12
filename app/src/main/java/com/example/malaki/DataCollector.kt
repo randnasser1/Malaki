@@ -39,22 +39,37 @@ class DataCollector(private val context: Context) {
                     return@Thread
                 }
 
-                // Read existing music data
-                val musicArray = try {
+                val prefs = context.getSharedPreferences("music_upload_prefs", android.content.Context.MODE_PRIVATE)
+                val lastUploadTs = prefs.getLong("lastMusicUploadTimestamp", 0L)
+
+                val fullArray = try {
                     JSONArray(musicFile.readText())
                 } catch (e: Exception) {
                     JSONArray()
                 }
 
-                if (musicArray.length() == 0) {
-                    Log.d(TAG, "📭 No music entries")
+                // Only collect entries newer than the last upload
+                val newEntries = JSONArray()
+                for (i in 0 until fullArray.length()) {
+                    val entry = fullArray.getJSONObject(i)
+                    if (entry.optLong("timestamp", 0L) > lastUploadTs) {
+                        newEntries.put(entry)
+                    }
+                }
+
+                if (newEntries.length() == 0) {
+                    Log.d(TAG, "⏭️ No new music entries since last upload")
                     return@Thread
                 }
 
-                Log.d(TAG, "Found ${musicArray.length()} music entries")
+                Log.d(TAG, "Found ${newEntries.length()} new music entries (${fullArray.length()} total in file)")
 
-                // Write directly to Firestore
-                saveMusicDataToFirestore(musicArray)
+                saveMusicDataToFirestore(newEntries) {
+                    // On success: record the upload time and clear the file
+                    prefs.edit().putLong("lastMusicUploadTimestamp", System.currentTimeMillis()).apply()
+                    try { musicFile.delete() } catch (_: Exception) {}
+                    Log.d(TAG, "🗑️ Music cache cleared after upload")
+                }
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error processing music data: ${e.message}")
@@ -108,8 +123,9 @@ class DataCollector(private val context: Context) {
                     "answers" to answers
                 )
 
-                // Just add a new document each time
-                firestore.collection("wellbeing_daily_summary").add(data).await()
+                firestore.collection("wellbeing_daily_summary")
+                    .document("${currentUser.uid}_$today")
+                    .set(data).await()
                 Log.d(TAG, "✅ Wellbeing saved: score=$score")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to save wellbeing: ${e.message}")
@@ -224,14 +240,13 @@ class DataCollector(private val context: Context) {
         }
     }
 
-    private fun saveMusicDataToFirestore(musicArray: JSONArray) {
+    private fun saveMusicDataToFirestore(musicArray: JSONArray, onSuccess: (() -> Unit)? = null) {
         GlobalScope.launch {
             try {
                 val auth = FirebaseAuth.getInstance()
                 val currentUser = auth.currentUser ?: return@launch
                 val firestore = FirebaseFirestore.getInstance()
 
-                // Build entries list for the music_tracking document
                 val entriesList = mutableListOf<Map<String, Any>>()
                 for (i in 0 until musicArray.length()) {
                     val track = musicArray.getJSONObject(i)
@@ -248,11 +263,10 @@ class DataCollector(private val context: Context) {
                     )
                 }
 
-                // Write a single music_tracking doc for this batch (backend reads this for RF classification)
                 val musicTrackingData = mapOf(
-                    "childId"          to currentUser.uid,
-                    "timestamp"        to System.currentTimeMillis(),
-                    "entries"          to entriesList,
+                    "childId"           to currentUser.uid,
+                    "timestamp"         to System.currentTimeMillis(),
+                    "entries"           to entriesList,
                     "emotion_processed" to false
                 )
                 firestore.collection("music_tracking")
@@ -260,10 +274,10 @@ class DataCollector(private val context: Context) {
                     .await()
 
                 Log.d(TAG, "✅ Music batch written to music_tracking (${entriesList.size} tracks)")
+                onSuccess?.invoke()
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error writing music data: ${e.message}")
-                e.printStackTrace()
             }
         }
     }

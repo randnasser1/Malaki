@@ -1,5 +1,6 @@
 package com.example.malaki.ui.screens.parent
 
+import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -15,9 +16,11 @@ import androidx.compose.ui.unit.dp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*  // This provides Date, Locale, UUID
 import org.json.JSONArray
@@ -389,17 +392,43 @@ fun ParentDashboard(
 
                             try {
                                 val firestore = FirebaseFirestore.getInstance()
-                                val docs = firestore.collection("wellbeing_daily_summary")
-                                    .whereEqualTo("childId", selectedChildId)
-                                    .get()
-                                    .await()
-
                                 val moods = mutableMapOf<String, String>()
                                 val journals = mutableMapOf<String, String>()
                                 val emotionSums = mutableMapOf<String, Double>()
                                 var journalCount = 0
 
-                                for (doc in docs.documents) {
+                                fun accumulateEmotions(journal: String, sentiment: Double) {
+                                    val lower = journal.lowercase()
+                                    var anyDetected = false
+                                    if (lower.contains("happy") || lower.contains("great") || lower.contains("good")) {
+                                        emotionSums["joy"] = (emotionSums["joy"] ?: 0.0) + (sentiment * 0.8)
+                                        anyDetected = true
+                                    }
+                                    if (lower.contains("sad") || lower.contains("depressed") || lower.contains("miss")) {
+                                        emotionSums["sadness"] = (emotionSums["sadness"] ?: 0.0) + (1 - sentiment) * 0.9
+                                        emotionSums["grief"] = (emotionSums["grief"] ?: 0.0) + (1 - sentiment) * 0.7
+                                        anyDetected = true
+                                    }
+                                    if (lower.contains("anxious") || lower.contains("worried") || lower.contains("scared")) {
+                                        emotionSums["nervousness"] = (emotionSums["nervousness"] ?: 0.0) + (1 - sentiment) * 0.8
+                                        emotionSums["fear"] = (emotionSums["fear"] ?: 0.0) + (1 - sentiment) * 0.6
+                                        anyDetected = true
+                                    }
+                                    if (lower.contains("love")) {
+                                        emotionSums["love"] = (emotionSums["love"] ?: 0.0) + sentiment * 0.9
+                                        anyDetected = true
+                                    }
+                                    if (!anyDetected)
+                                        emotionSums["neutral"] = (emotionSums["neutral"] ?: 0.0) + 0.5
+                                }
+
+                                // Primary source: wellbeing_daily_summary (has DistilBERT sentiment)
+                                val summaryDocs = firestore.collection("wellbeing_daily_summary")
+                                    .whereEqualTo("childId", selectedChildId)
+                                    .get()
+                                    .await()
+
+                                for (doc in summaryDocs.documents) {
                                     val date = doc.getString("date") ?: continue
                                     val mood = doc.getString("dailyMood") ?: doc.getString("dominantEmotion")
                                     val journal = doc.getString("journalText")
@@ -409,47 +438,54 @@ fun ParentDashboard(
                                     if (!journal.isNullOrEmpty()) {
                                         journals[date] = journal
                                         journalCount++
-
-                                        // Build emotion analysis from journal text
-                                        val lowerJournal = journal.lowercase()
-                                        when {
-                                            lowerJournal.contains("happy") || lowerJournal.contains("great") || lowerJournal.contains("good") -> {
-                                                emotionSums["joy"] = (emotionSums["joy"] ?: 0.0) + (journalSentiment * 0.8)
-                                            }
-                                            lowerJournal.contains("sad") || lowerJournal.contains("depressed") || lowerJournal.contains("miss") -> {
-                                                emotionSums["sadness"] = (emotionSums["sadness"] ?: 0.0) + (1 - journalSentiment) * 0.9
-                                                emotionSums["grief"] = (emotionSums["grief"] ?: 0.0) + (1 - journalSentiment) * 0.7
-                                            }
-                                            lowerJournal.contains("anxious") || lowerJournal.contains("worried") || lowerJournal.contains("scared") -> {
-                                                emotionSums["nervousness"] = (emotionSums["nervousness"] ?: 0.0) + (1 - journalSentiment) * 0.8
-                                                emotionSums["fear"] = (emotionSums["fear"] ?: 0.0) + (1 - journalSentiment) * 0.6
-                                            }
-                                            lowerJournal.contains("love") -> {
-                                                emotionSums["love"] = (emotionSums["love"] ?: 0.0) + journalSentiment * 0.9
-                                            }
-                                            else -> {
-                                                emotionSums["neutral"] = (emotionSums["neutral"] ?: 0.0) + 0.5
-                                            }
-                                        }
+                                        accumulateEmotions(journal, journalSentiment)
                                     }
+                                }
+
+                                // Fallback: users/{childId}/journals (saved even when backend is offline)
+                                try {
+                                    val fallbackDocs = firestore.collection("users")
+                                        .document(selectedChildId!!)
+                                        .collection("journals")
+                                        .get()
+                                        .await()
+
+                                    for (doc in fallbackDocs.documents) {
+                                        val date = doc.getString("date") ?: continue
+                                        val journalText = doc.getString("text") ?: continue
+                                        if (journals.containsKey(date)) continue  // already processed from summary
+                                        journals[date] = journalText
+                                        journalCount++
+                                        accumulateEmotions(journalText, 0.5)
+                                    }
+                                } catch (e: Exception) {
+                                    Log.w("DASHBOARD", "Fallback journal fetch failed: ${e.message}")
                                 }
 
                                 moodData = moods
                                 journalData = journals
 
                                 journalEmotions = if (journalCount > 0 && emotionSums.isNotEmpty()) {
-                                    emotionSums.map { (emotion, sum) ->
-                                        WellbeingData(
-                                            category = emotion.replaceFirstChar { it.uppercase() },
-                                            score = ((sum / journalCount) * 100).toInt().coerceIn(0, 100)
-                                        )
-                                    }.sortedByDescending { it.score }.take(8)
+                                    val rawList = emotionSums.map { (emotion, sum) ->
+                                        emotion to (sum / journalCount).coerceAtLeast(0.0)
+                                    }
+                                    val total = rawList.sumOf { it.second }
+                                    if (total > 0) {
+                                        rawList.map { (emotion, raw) ->
+                                            WellbeingData(
+                                                category = emotion.replaceFirstChar { it.uppercase() },
+                                                score = ((raw / total) * 100).toInt().coerceIn(1, 100)
+                                            )
+                                        }.sortedByDescending { it.score }.take(8)
+                                    } else {
+                                        emptyList()
+                                    }
                                 } else {
                                     emptyList()
                                 }
 
                             } catch (e: Exception) {
-                                Log.e("DASHBOARD", "Error loading data: ${e.message}")
+                                Log.e("DASHBOARD", "Error loading wellbeing data: ${e.message}")
                             }
 
                             isLoadingWellbeing = false
@@ -1182,7 +1218,6 @@ fun loadGroomingProbabilityFromFirebase(childId: String, onResult: (Float) -> Un
             val thirtyDaysAgo = System.currentTimeMillis() - (30 * 24 * 60 * 60 * 1000L)
             val docs = firestore.collection("event_analysis")
                 .whereEqualTo("childId", childId)
-                .orderBy("analyzedAt", Query.Direction.DESCENDING)
                 .limit(30)
                 .get()
                 .await()
@@ -1214,8 +1249,8 @@ fun triggerAlertNotificationIfNeeded(context: android.content.Context, alerts: L
         val top = highAlerts.first()
         val title = if (top.riskLevel == "CRITICAL") "🚨 Critical Safety Alert" else "⚠️ High Risk Alert"
         val body = when (top.threatType) {
-            "confirmed_predator" -> "An adult with predatory behavior contacted your child."
-            "peer_predatory"     -> "A peer is showing predatory behavior — review needed."
+            "confirmed_predator" -> "Predicted adult sender showing predatory behavior. Review immediately."
+            "peer_predatory"     -> "Predicted minor sender showing grooming patterns — review needed."
             else                 -> "Suspicious activity detected. Open the app to review."
         }
         val notif = androidx.core.app.NotificationCompat.Builder(context, "risk_alerts_parent")
@@ -1301,27 +1336,6 @@ fun ChildStatusBanner(
                     fontSize = 13.sp,
                     lineHeight = 18.sp
                 )
-                if (groomingProbability > 0f) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "Grooming risk score: ",
-                            color = Color(0xFF6B7280),
-                            fontSize = 11.sp
-                        )
-                        val gpColor = when {
-                            groomingProbability >= 0.65f -> Color(0xFFEF4444)
-                            groomingProbability >= 0.35f -> Color(0xFFF59E0B)
-                            else                         -> Color(0xFF10B981)
-                        }
-                        Text(
-                            "${(groomingProbability * 100).toInt()}%",
-                            color = gpColor,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
             }
         }
     }
@@ -1428,18 +1442,47 @@ fun RiskAlertsCard(
                     }
                 }
                 else -> {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        alerts.take(5).forEach { alert ->
-                            RiskAlertRow(alert = alert)
-                        }
+                    var currentIndex by remember { mutableStateOf(0) }
+                    val total = alerts.size
 
-                        if (alerts.size > 5) {
-                            Text(
-                                text = "+ ${alerts.size - 5} more alerts",
-                                color = Color(0xFF6B7280),
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(top = 4.dp)
-                            )
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        // Alert card
+                        RiskAlertRow(alert = alerts[currentIndex])
+
+                        // Navigation row
+                        if (total > 1) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(
+                                    onClick = { if (currentIndex > 0) currentIndex-- },
+                                    enabled = currentIndex > 0
+                                ) {
+                                    Text(
+                                        "←",
+                                        fontSize = 20.sp,
+                                        color = if (currentIndex > 0) Color(0xFF374151) else Color(0xFFD1D5DB)
+                                    )
+                                }
+                                Text(
+                                    "${currentIndex + 1} / $total",
+                                    fontSize = 13.sp,
+                                    color = Color(0xFF6B7280),
+                                    fontWeight = FontWeight.Medium
+                                )
+                                IconButton(
+                                    onClick = { if (currentIndex < total - 1) currentIndex++ },
+                                    enabled = currentIndex < total - 1
+                                ) {
+                                    Text(
+                                        "→",
+                                        fontSize = 20.sp,
+                                        color = if (currentIndex < total - 1) Color(0xFF374151) else Color(0xFFD1D5DB)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -1457,25 +1500,25 @@ fun loadTbatsAnalysis(context: android.content.Context, childId: String, onResul
         }
 
         val client = OkHttpClient.Builder()
-            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
             .build()
 
-        // Step 1: trigger music emotion classification before TBATS reads the results.
-        // Fire-and-wait so TBATS sees the freshly processed tracks.
-        try {
-            val processRequest = Request.Builder()
-                .url("${BuildConfig.BACKEND_BASE_URL}/music/process/$childId")
-                .apply { if (idToken != null) addHeader("Authorization", "Bearer $idToken") }
-                .post("".toRequestBody("application/json".toMediaType()))
-                .build()
-            client.newCall(processRequest).execute().close()
-            Log.d("TBATS", "✅ music/process done for $childId")
-        } catch (e: Exception) {
-            Log.w("TBATS", "music/process failed (non-fatal): ${e.message}")
+        // Trigger music processing in background — don't block TBATS on it
+        GlobalScope.launch {
+            try {
+                val processRequest = Request.Builder()
+                    .url("${BuildConfig.BACKEND_BASE_URL}/music/process/$childId")
+                    .apply { if (idToken != null) addHeader("Authorization", "Bearer $idToken") }
+                    .post("".toRequestBody("application/json".toMediaType()))
+                    .build()
+                OkHttpClient().newCall(processRequest).execute().close()
+            } catch (e: Exception) {
+                Log.w("TBATS", "music/process failed (non-fatal): ${e.message}")
+            }
         }
 
-        // Step 2: run TBATS analysis
+        // Run TBATS analysis immediately without waiting for music/process
         try {
             val request = Request.Builder()
                 .url("${BuildConfig.BACKEND_BASE_URL}/analyze/tbats/$childId?days=30")
@@ -1559,7 +1602,9 @@ fun loadTbatsAnalysis(context: android.content.Context, childId: String, onResul
                 }
 
                 if (json.optString("status") == "computing") {
-                    Log.i("TBATS", "Analysis computing in background — keeping spinner")
+                    Log.i("TBATS", "Analysis still computing")
+                    onResult(TbatsAnalysisResult("LOW", "🎵 Analysis in progress", "📱 Analysis in progress",
+                        false, 0, emptyList(), false, 0, emptyList()))
                     return@launch
                 }
 
@@ -1592,36 +1637,36 @@ fun RiskAlertRow(alert: RiskAlert) {
         else       -> "ℹ️"
     }
 
-    // Author badge appearance
+    // Author badge — shows BERT predicted age
     val (authorIcon, authorText, authorBadgeColor) = when (alert.authorLabel) {
-        "Adult"  -> Triple("👤", "Adult Contact", Color(0xFFDC2626))
-        "Minor"  -> Triple("🧒", "Peer / Minor",  Color(0xFF8B5CF6))
-        else     -> Triple("❓", "Unknown Contact", Color(0xFF6B7280))
+        "Adult"  -> Triple("👤", "Predicted: Adult", Color(0xFFDC2626))
+        "Minor"  -> Triple("🧒", "Predicted: Minor", Color(0xFF8B5CF6))
+        else     -> Triple("❓", "Age Unknown",       Color(0xFF6B7280))
     }
 
     // Human-readable threat label
     val threatLabel = when (alert.threatType) {
         "confirmed_predator"      -> "Confirmed Predatory Behavior"
         "peer_predatory"          -> "Predatory Peer Behavior"
-        "predatory_unknown_author"-> "Predatory – Contact Unknown"
-        "suspicious_adult"        -> "Suspicious Adult Contact"
+        "predatory_unknown_author"-> "Predatory – Age Unknown"
+        "suspicious_adult"        -> "Suspicious Adult"
         "risky_peer"              -> "Risky Peer Interaction"
-        "suspicious_unknown"      -> "Suspicious – Contact Unknown"
+        "suspicious_unknown"      -> "Suspicious – Age Unknown"
         else                      -> "Risk Detected"
     }
 
     // Contextual explainability based on author + threat combination
     val contextualExplain: String? = when (alert.threatType) {
         "confirmed_predator" ->
-            "HIGH RISK: An adult is using predatory language with your child. This is a serious threat — review immediately and consider blocking this contact."
+            "HIGH RISK: The sender is predicted to be an adult using predatory language with your child. Review immediately."
         "peer_predatory" ->
-            "NEEDS INVESTIGATION: Another child is sending messages with grooming patterns. This could be teen grooming or an adult pretending to be a child. Review the conversation carefully."
+            "NEEDS INVESTIGATION: The sender is predicted to be a minor showing grooming patterns. This could be teen grooming or an adult pretending to be a child."
         "predatory_unknown_author" ->
-            "Predatory behavior detected from an unknown contact. The sender's age could not be determined — treat as high risk until verified."
+            "Predatory behavior detected. The sender's age could not be determined — treat as high risk until verified."
         "suspicious_adult" ->
-            "An adult contact is communicating in ways that raise concern. Monitor this contact closely."
+            "The sender is predicted to be an adult communicating in ways that raise concern. Monitor closely."
         "risky_peer" ->
-            "A peer interaction was flagged as potentially risky. Review the conversation to determine if it's harmless or warrants action."
+            "A peer interaction was flagged as potentially risky. Review the conversation to determine if it warrants action."
         else -> null
     }
 
@@ -2019,58 +2064,61 @@ fun loadAlertsFromFirebase(
     childId: String,
     onResult: (List<RiskAlert>) -> Unit
 ) {
-    GlobalScope.launch {
+    GlobalScope.launch(Dispatchers.IO) {
         try {
+            android.util.Log.d("RiskAlerts", "Querying event_analysis for childId=$childId")
             val firestore = FirebaseFirestore.getInstance()
-            val thirtyDaysAgo = System.currentTimeMillis() - (30 * 24 * 60 * 60 * 1000L)
 
+            // Filter by riskLevel at the DB level (single-field auto-index, no composite index needed).
+            // Then narrow to this child in memory to avoid the alphabetical-document-ID cutoff problem.
             val docs = firestore.collection("event_analysis")
-                .whereEqualTo("childId", childId)
-                .orderBy("analyzedAt", Query.Direction.DESCENDING)
-                .limit(100)
+                .whereIn("riskLevel", listOf("HIGH", "MEDIUM", "CRITICAL"))
                 .get()
                 .await()
 
-            val alerts = docs.documents.mapNotNull { doc ->
-                val analyzedAt = doc.getLong("analyzedAt") ?: 0L
-                if (analyzedAt < thirtyDaysAgo) return@mapNotNull null
-                val riskLevel = doc.getString("riskLevel") ?: return@mapNotNull null
-                if (riskLevel !in listOf("MEDIUM", "HIGH", "CRITICAL")) return@mapNotNull null
+            android.util.Log.d("RiskAlerts", "Got ${docs.size()} HIGH/MEDIUM/CRITICAL docs from event_analysis")
 
+            val alerts = docs.documents.mapNotNull { doc ->
+                val riskLevel = doc.getString("riskLevel") ?: return@mapNotNull null
+                if (doc.getString("childId") != childId) return@mapNotNull null
+                android.util.Log.d("RiskAlerts", "matched doc=${doc.id} riskLevel=$riskLevel")
+
+                val timestamp   = doc.getLong("timestamp") ?: doc.getLong("analyzedAt") ?: System.currentTimeMillis()
                 val gp          = (doc.getDouble("groomingProbability") ?: doc.getDouble("riskScore") ?: 0.0).toFloat()
                 val authorLabel = doc.getString("authorLabel") ?: "Unknown"
                 val threatType  = when {
-                    authorLabel == "Adult" && gp >= 0.65f  -> "confirmed_predator"
-                    authorLabel == "Minor" && gp >= 0.65f  -> "peer_predatory"
-                    authorLabel == "Adult"                  -> "suspicious_adult"
-                    authorLabel == "Minor"                  -> "risky_peer"
-                    gp >= 0.65f                             -> "predatory_unknown_author"
-                    else                                    -> "suspicious_unknown"
+                    authorLabel == "Adult" && gp >= 0.65f -> "confirmed_predator"
+                    authorLabel == "Minor" && gp >= 0.65f -> "peer_predatory"
+                    authorLabel == "Adult"                 -> "suspicious_adult"
+                    authorLabel == "Minor"                 -> "risky_peer"
+                    gp >= 0.65f                            -> "predatory_unknown_author"
+                    else                                   -> "suspicious_unknown"
                 }
-                val explainText = doc.getString("explanation")
-                    ?: when (riskLevel) {
-                        "HIGH"   -> "High grooming risk detected. Parental review recommended."
-                        else     -> "Suspicious behavior detected. Monitor this contact."
-                    }
+                val explainText  = doc.getString("explanation")
+                    ?: doc.getString("explainabilityText")
+                    ?: "Suspicious behavior detected."
+                val messageText  = doc.getString("messageText") ?: ""
 
                 RiskAlert(
-                    id = doc.id,
-                    url = "⚠️ Content flagged",
-                    riskLevel = riskLevel,
-                    blockReasons = listOf(explainText),
-                    confidenceScore = gp,
-                    timestamp = analyzedAt,
-                    messageText = doc.getString("messageText") ?: "",
-                    authorLabel = authorLabel,
-                    threatType = threatType,
-                    explainabilityText = explainText,
+                    id                  = doc.id,
+                    url                 = "",
+                    riskLevel           = riskLevel,
+                    blockReasons        = listOf(explainText),
+                    confidenceScore     = (doc.getDouble("authorConfidence") ?: gp.toDouble()).toFloat(),
+                    timestamp           = timestamp,
+                    messageText         = messageText,
+                    authorLabel         = authorLabel,
+                    threatType          = threatType,
+                    explainabilityText  = explainText,
                     groomingProbability = gp
                 )
             }.sortedByDescending { it.timestamp }
 
-            onResult(alerts)
+            android.util.Log.d("RiskAlerts", "Final alerts count: ${alerts.size}")
+            withContext(Dispatchers.Main) { onResult(alerts) }
         } catch (e: Exception) {
-            loadAlertsFromLocalStorage(context, onResult)
+            android.util.Log.e("RiskAlerts", "Query failed: ${e.message}", e)
+            withContext(Dispatchers.Main) { onResult(emptyList()) }
         }
     }
 }
@@ -2411,23 +2459,23 @@ fun AppCategoryAnomalyRow(data: CategoryAnomalyData) {
                 if (!data.enoughData) {
                     Text("Collecting data for this category", color = Color(0xFF9CA3AF), fontSize = 11.sp)
                 } else {
-                    val actualPct   = (data.actual   * 100).toInt()
-                    val forecastPct = (data.forecast * 100).toInt()
-                    Text("Today: $actualPct% of daily cap · Expected: ~$forecastPct%",
-                        color = Color(0xFF6B7280), fontSize = 11.sp)
+                    val actualPct = (data.actual * 100).toInt()
+                    Text("$actualPct% of daily cap", color = Color(0xFF6B7280), fontSize = 11.sp)
                 }
             }
             Spacer(Modifier.width(6.dp))
-            if (data.isAnomaly) {
+            if (data.enoughData) {
                 Surface(shape = RoundedCornerShape(50), color = anomalyColor.copy(alpha = 0.15f)) {
                     Text(
-                        if (data.direction == "high") "↑ High" else "↓ Low",
+                        when {
+                            data.isAnomaly && data.direction == "high" -> "↑ High"
+                            data.isAnomaly && data.direction == "low"  -> "↓ Low"
+                            else                                        -> "Normal"
+                        },
                         color = anomalyColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                     )
                 }
-            } else if (data.enoughData) {
-                Text("✓", color = Color(0xFF10B981), fontSize = 16.sp, fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -2511,24 +2559,21 @@ fun MusicEmotionAnomalyRow(data: EmotionAnomalyData) {
                 )
                 if (!data.enoughData) {
                     Text("Collecting data for this emotion", color = Color(0xFF9CA3AF), fontSize = 11.sp)
-                } else {
-                    val actualCount   = data.actual.toInt()
-                    val forecastCount = data.forecast.toInt()
-                    Text("Today: $actualCount plays · Expected: ~$forecastCount",
-                        color = Color(0xFF6B7280), fontSize = 11.sp)
                 }
             }
             Spacer(Modifier.width(6.dp))
-            if (data.isAnomaly) {
+            if (data.enoughData) {
                 Surface(shape = RoundedCornerShape(50), color = anomalyColor.copy(alpha = 0.15f)) {
                     Text(
-                        if (data.direction == "high") "↑ More" else "↓ Less",
+                        when {
+                            data.isAnomaly && data.direction == "high" -> "↑ High"
+                            data.isAnomaly && data.direction == "low"  -> "↓ Low"
+                            else                                        -> "Normal"
+                        },
                         color = anomalyColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                     )
                 }
-            } else if (data.enoughData) {
-                Text("✓", color = Color(0xFF10B981), fontSize = 16.sp, fontWeight = FontWeight.Bold)
             }
         }
     }

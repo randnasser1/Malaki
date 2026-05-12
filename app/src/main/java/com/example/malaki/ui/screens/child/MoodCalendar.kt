@@ -2,8 +2,10 @@ package com.example.malaki.ui.screens.child
 
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,11 +25,19 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 val moodColors = mapOf(
-    "great" to Color(0xFFE8F5A8),
-    "good" to Color(0xFFF3D97F),
-    "okay" to Color(0xFFD4D4D8),
-    "sad" to Color(0xFF9CA3AF),
-    "anxious" to Color(0xFFF3E8A8)
+    "great" to Color(0xFF10B981),
+    "good" to Color(0xFF34D399),
+    "okay" to Color(0xFFF59E0B),
+    "sad" to Color(0xFFEF4444),
+    "anxious" to Color(0xFFF97316)
+)
+
+val moodEmojis = mapOf(
+    "great" to "😊",
+    "good" to "😊",
+    "okay" to "😐",
+    "sad" to "😢",
+    "anxious" to "😰"
 )
 
 @Composable
@@ -180,22 +190,32 @@ fun MoodCalendar(
                         val dayNum = day + 1
                         val dateStr = formatDate(dayNum)
                         val mood = if (moods.has(dateStr)) moods.getString(dateStr) else null
-                        val moodColor = mood?.let { moodColors[it] } ?: Color.Transparent
+                        val bgColor = mood?.let { moodColors[it] } ?: Color(0xFFF3F4F6)
+                        val emoji = mood?.let { moodEmojis[it] }
                         val isSelected = selectedDay == dateStr
 
-                        Surface(
+                        Box(
                             modifier = Modifier
                                 .size(44.dp)
+                                .padding(2.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSelected) bgColor.copy(alpha = 0.8f) else bgColor)
+                                .then(
+                                    if (isSelected) Modifier.border(2.dp, bgColor.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                                    else Modifier
+                                )
                                 .clickable { selectedDay = dateStr },
-                            shape = RoundedCornerShape(16.dp),
-                            color = if (isSelected) moodColor.copy(alpha = 0.3f) else moodColor.copy(alpha = 0.2f),
-                            border = if (isSelected) androidx.compose.foundation.BorderStroke(2.dp, moodColor) else null
+                            contentAlignment = Alignment.Center
                         ) {
-                            Box(contentAlignment = Alignment.Center) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                if (emoji != null) {
+                                    Text(emoji, fontSize = 14.sp)
+                                }
                                 Text(
                                     text = dayNum.toString(),
-                                    color = if (mood != null) Color(0xFF1F2937) else Color(0xFF9CA3AF),
-                                    fontSize = 14.sp
+                                    color = if (mood != null) Color.White else Color(0xFF9CA3AF),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Medium
                                 )
                             }
                         }
@@ -212,65 +232,44 @@ fun MoodCalendar(
                 exit = fadeOut() + slideOutVertically()
             ) {
                 selectedDayData?.let { (dateStr, mood, journal) ->
-                    Card(
+                    Surface(
                         modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(24.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color.White),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFFF3F4F6)
                     ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp)
-                        ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
                             Text(
                                 text = formatDateForDisplay(dateStr),
-                                color = Color(0xFF1F2937),
-                                fontWeight = FontWeight.Medium
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
                             )
-
-                            Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
 
                             if (mood != null) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                    val moodEmoji = moodEmojis[mood] ?: "❓"
+                                    Text("$moodEmoji Mood: ", fontSize = 12.sp, color = Color(0xFF6B7280))
                                     Text(
-                                        text = "Mood: ",
-                                        color = Color(0xFF6B7280),
-                                        fontSize = 14.sp
+                                        mood.replaceFirstChar { it.uppercase() },
+                                        color = moodColors[mood] ?: Color(0xFF6B7280),
+                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 12.sp
                                     )
-                                    Surface(
-                                        shape = RoundedCornerShape(50),
-                                        color = moodColors[mood]?.copy(alpha = 0.3f) ?: Color.Transparent
-                                    ) {
-                                        Text(
-                                            text = mood,
-                                            color = moodColors[mood] ?: Color(0xFF6B7280),
-                                            fontSize = 14.sp,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                        )
-                                    }
                                 }
                             }
 
                             if (!journal.isNullOrEmpty()) {
-                                Spacer(modifier = Modifier.height(8.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text("📝 Journal:", fontSize = 12.sp, color = Color(0xFF6B7280))
                                 Text(
-                                    text = "Journal entry:",
-                                    color = Color(0xFF6B7280),
-                                    fontSize = 14.sp
-                                )
-                                Text(
-                                    text = journal,
-                                    color = Color(0xFF374151),
-                                    fontSize = 14.sp,
-                                    modifier = Modifier.padding(top = 4.dp)
+                                    journal.take(150) + if (journal.length > 150) "..." else "",
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF374151)
                                 )
                             }
 
                             if (mood == null && journal == null) {
-                                Text(
-                                    text = "No entries for this day",
-                                    color = Color(0xFF9CA3AF),
-                                    fontSize = 14.sp
-                                )
+                                Text("No entries for this day", fontSize = 12.sp, color = Color(0xFF9CA3AF))
                             }
                         }
                     }

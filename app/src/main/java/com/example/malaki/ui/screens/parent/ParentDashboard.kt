@@ -22,7 +22,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
-import java.util.*  // This provides Date, Locale, UUID
+import java.util.*
 import org.json.JSONArray
 import org.json.JSONObject
 import androidx.compose.ui.platform.LocalContext
@@ -37,8 +37,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.sp
 import com.example.malaki.BuildConfig
 import com.example.malaki.ui.theme.*
-import java.util.Date
-import java.util.Locale
 import androidx.compose.ui.text.style.TextAlign
 // Data classes
 data class SentimentData(val day: String, val score: Int)
@@ -375,7 +373,119 @@ fun ParentDashboard(
                         groomingProbability = groomingProbability
                     )
                 }
+// 🆕 TOP EMOTIONS CARD - ADD THIS HERE
+                item {
+                    var topEmotions by remember { mutableStateOf<List<Pair<String, Float>>>(emptyList()) }
 
+                    LaunchedEffect(selectedChildId) {
+                        if (selectedChildId != null && selectedChildId!!.isNotEmpty()) {
+                            try {
+                                val firestore = FirebaseFirestore.getInstance()
+                                // Single-field filter only — avoids composite index requirement
+                                val raw = firestore.collection("event_analysis")
+                                    .whereEqualTo("childId", selectedChildId)
+                                    .limit(60)
+                                    .get()
+                                    .await()
+
+                                val relevant = raw.documents
+                                    .filter { it.getString("eventType") in listOf("MESSAGE", "JOURNAL") }
+                                    .sortedByDescending { it.getLong("timestamp") ?: 0L }
+                                    .take(20)
+
+                                val emotionSums = mutableMapOf<String, Float>()
+                                var count = 0
+
+                                for (doc in relevant) {
+                                    @Suppress("UNCHECKED_CAST")
+                                    val vector = doc.get("emotionVector") as? Map<String, Any> ?: continue
+                                    count++
+                                    vector.forEach { (emotion, scoreAny) ->
+                                        val score = when (scoreAny) {
+                                            is Double -> scoreAny.toFloat()
+                                            is Float -> scoreAny
+                                            else -> 0f
+                                        }
+                                        emotionSums[emotion] = (emotionSums[emotion] ?: 0f) + score
+                                    }
+                                }
+
+                                if (count > 0 && emotionSums.isNotEmpty()) {
+                                    topEmotions = emotionSums.map { (emotion, sum) ->
+                                        emotion to (sum / count)
+                                    }.sortedByDescending { it.second }.take(5)
+                                }
+                            } catch (e: Exception) {
+                                Log.e("DASHBOARD", "Error loading emotions: ${e.message}")
+                            }
+                        }
+                    }
+
+                    DashboardCard(
+                        title = "Current Emotions",
+                        subtitle = "DistilBERT analysis",
+                        icon = "😊",
+                        iconColor = Color(0xFF8B5CF6)
+                    ) {
+                        if (topEmotions.isEmpty()) {
+                            Text("No analyzed events yet", color = Color(0xFF6B7280), modifier = Modifier.padding(8.dp))
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                topEmotions.forEach { (emotion, score) ->
+                                    val emoji = EMOTION_EMOJIS[emotion] ?: "😐"
+                                    val color = EMOTION_COLORS[emotion] ?: Color(0xFF6B7280)
+                                    val percent = (score * 100).toInt()
+
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(emoji, fontSize = 20.sp, modifier = Modifier.width(36.dp))
+                                        Text(
+                                            text = emotion.replaceFirstChar { it.uppercase() },
+                                            color = Color(0xFF374151),
+                                            fontSize = 14.sp,
+                                            modifier = Modifier.width(100.dp)
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(8.dp)
+                                                .background(Color(0xFFE5E7EB), RoundedCornerShape(4.dp))
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxHeight()
+                                                    .fillMaxWidth(percent / 100f)
+                                                    .background(color, RoundedCornerShape(4.dp))
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "$percent%",
+                                            color = color,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            modifier = Modifier.width(40.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                  // Risk Alerts Card
+                item {
+                    RiskAlertsCard(
+                        alerts = alerts,
+                        isLoading = isLoadingAlerts,
+                        onRefresh = {
+                            val childId = selectedChildId ?: return@RiskAlertsCard
+                            isLoadingAlerts = true
+                            loadAlertsFromFirebase(context, childId) { newAlerts ->
+                                alerts = newAlerts
+                                isLoadingAlerts = false
+                            }
+                        }
+                    )
+                }
 // Wellbeing Indicators Card (Tabbed: Journal Emotions vs Daily Mood Calendar)
                 item {
                     var selectedWellbeingTab by remember { mutableStateOf(0) }
@@ -494,7 +604,7 @@ fun ParentDashboard(
 
                     DashboardCard(
                         title = "Wellbeing Indicators",
-                        subtitle = if (selectedWellbeingTab == 0) "📝 AI-analyzed from journal entries" else "😊 Daily mood check-ins",
+                        subtitle = if (selectedWellbeingTab == 0) "Distilbert Analysis from journal entries" else "😊 Daily mood check-ins",
                         icon = if (selectedWellbeingTab == 0) "📝" else "📅",
                         iconColor = Color(0xFF10B981)
                     ) {
@@ -879,107 +989,7 @@ fun ParentDashboard(
                         }
                     }
                 }
-
-// 🆕 TOP EMOTIONS CARD - ADD THIS HERE
-                item {
-                    var topEmotions by remember { mutableStateOf<List<Pair<String, Float>>>(emptyList()) }
-
-                    LaunchedEffect(selectedChildId) {
-                        if (selectedChildId != null && selectedChildId!!.isNotEmpty()) {
-                            try {
-                                val firestore = FirebaseFirestore.getInstance()
-                                // Single-field filter only — avoids composite index requirement
-                                val raw = firestore.collection("event_analysis")
-                                    .whereEqualTo("childId", selectedChildId)
-                                    .limit(60)
-                                    .get()
-                                    .await()
-
-                                val relevant = raw.documents
-                                    .filter { it.getString("eventType") in listOf("MESSAGE", "JOURNAL") }
-                                    .sortedByDescending { it.getLong("timestamp") ?: 0L }
-                                    .take(20)
-
-                                val emotionSums = mutableMapOf<String, Float>()
-                                var count = 0
-
-                                for (doc in relevant) {
-                                    @Suppress("UNCHECKED_CAST")
-                                    val vector = doc.get("emotionVector") as? Map<String, Any> ?: continue
-                                    count++
-                                    vector.forEach { (emotion, scoreAny) ->
-                                        val score = when (scoreAny) {
-                                            is Double -> scoreAny.toFloat()
-                                            is Float -> scoreAny
-                                            else -> 0f
-                                        }
-                                        emotionSums[emotion] = (emotionSums[emotion] ?: 0f) + score
-                                    }
-                                }
-
-                                if (count > 0 && emotionSums.isNotEmpty()) {
-                                    topEmotions = emotionSums.map { (emotion, sum) ->
-                                        emotion to (sum / count)
-                                    }.sortedByDescending { it.second }.take(5)
-                                }
-                            } catch (e: Exception) {
-                                Log.e("DASHBOARD", "Error loading emotions: ${e.message}")
-                            }
-                        }
-                    }
-
-                    DashboardCard(
-                        title = "Current Emotions",
-                        subtitle = "DistilBERT analysis — last 20 messages & journals",
-                        icon = "😊",
-                        iconColor = Color(0xFF8B5CF6)
-                    ) {
-                        if (topEmotions.isEmpty()) {
-                            Text("No analyzed events yet", color = Color(0xFF6B7280), modifier = Modifier.padding(8.dp))
-                        } else {
-                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                topEmotions.forEach { (emotion, score) ->
-                                    val emoji = EMOTION_EMOJIS[emotion] ?: "😐"
-                                    val color = EMOTION_COLORS[emotion] ?: Color(0xFF6B7280)
-                                    val percent = (score * 100).toInt()
-
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(emoji, fontSize = 20.sp, modifier = Modifier.width(36.dp))
-                                        Text(
-                                            text = emotion.replaceFirstChar { it.uppercase() },
-                                            color = Color(0xFF374151),
-                                            fontSize = 14.sp,
-                                            modifier = Modifier.width(100.dp)
-                                        )
-                                        Box(
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .height(8.dp)
-                                                .background(Color(0xFFE5E7EB), RoundedCornerShape(4.dp))
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .fillMaxHeight()
-                                                    .fillMaxWidth(percent / 100f)
-                                                    .background(color, RoundedCornerShape(4.dp))
-                                            )
-                                        }
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = "$percent%",
-                                            color = color,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            modifier = Modifier.width(40.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-// App Usage Card — Day / Week toggle
+              // App Usage Card — Day / Week toggle
                 item {
                     var appView by remember { mutableStateOf("week") }
                     var dayOffset by remember { mutableStateOf(0) }
@@ -1086,24 +1096,9 @@ fun ParentDashboard(
                             }
                         }
                     }
-                }
+                }  
 
-                // Safety Overview Card
-                item {
-                    DashboardCard(
-                        title = "Safety Overview",
-                        icon = "⚠️",
-                        iconColor = Color(0xFFEF4444)
-                    ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            safetyIndicators.forEach { indicator ->
-                                SafetyIndicatorRow(indicator)
-                            }
-                        }
-                    }
-                }
-
-                // Behavioral Pattern Analysis — two-tab: App Usage Anomalies | Music Emotion Anomalies
+ // Behavioral Pattern Analysis — two-tab: App Usage Anomalies | Music Emotion Anomalies
                 item {
                     var selectedBehaviorTab by remember { mutableStateOf(0) }
 
@@ -1162,21 +1157,26 @@ fun ParentDashboard(
                     }
                 }
 
-                // Risk Alerts Card
+
+
+                // Safety Overview Card
                 item {
-                    RiskAlertsCard(
-                        alerts = alerts,
-                        isLoading = isLoadingAlerts,
-                        onRefresh = {
-                            val childId = selectedChildId ?: return@RiskAlertsCard
-                            isLoadingAlerts = true
-                            loadAlertsFromFirebase(context, childId) { newAlerts ->
-                                alerts = newAlerts
-                                isLoadingAlerts = false
+                    DashboardCard(
+                        title = "Safety Overview",
+                        icon = "⚠️",
+                        iconColor = Color(0xFFEF4444)
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            safetyIndicators.forEach { indicator ->
+                                SafetyIndicatorRow(indicator)
                             }
                         }
-                    )
+                    }
                 }
+
+               
+
+              
 
                 // Explainer Card
                 item {
@@ -2004,16 +2004,17 @@ fun loadDashboardDataFromFirebase(
             )
 
             // ========== MUSIC INSIGHTS (from processed RF emotion results) ==========
-            // Single-field filter only — no composite index required; filter in Kotlin
+            // Single-field filter only — no composite index required; date filter applied in Kotlin.
             val musicDocs = firestore.collection("music_tracking")
                 .whereEqualTo("childId", childId)
-                .limit(50)
+                .limit(200)
                 .get()
                 .await()
 
             val emotionCounts = mutableMapOf<String, Int>()
             var totalTracks = 0
             for (doc in musicDocs.documents) {
+                if ((doc.getLong("timestamp") ?: 0L) < sevenDaysAgo) continue
                 if (doc.getBoolean("emotion_processed") != true) continue
                 @Suppress("UNCHECKED_CAST")
                 val emotionResults = doc.get("emotion_results") as? List<Map<String, Any>> ?: emptyList()
@@ -2539,7 +2540,7 @@ fun MusicEmotionAnomalyRow(data: EmotionAnomalyData) {
     val anomalyColor = when {
         data.isAnomaly && data.direction == "high" -> Color(0xFFEF4444)
         data.isAnomaly && data.direction == "low"  -> Color(0xFF3B82F6)
-        else                                        -> baseColor
+        else                                        -> Color(0xFF10B981)
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),

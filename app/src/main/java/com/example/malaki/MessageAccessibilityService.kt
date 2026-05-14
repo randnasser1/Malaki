@@ -18,6 +18,7 @@ import kotlin.collections.component1
 import kotlin.collections.component2
 import kotlin.collections.set
 
+
 class MessageAccessibilityService : AccessibilityService() {
 
     companion object {
@@ -26,6 +27,8 @@ class MessageAccessibilityService : AccessibilityService() {
         private var lastProcessTime = 0L
         private const val MIN_PROCESS_INTERVAL = 500L
         private var lastCapturedUrl: String? = null
+        private var lastBrowserScanTime = 0L
+        private const val BROWSER_SCAN_INTERVAL = 1000L // scan URL bar at most once per second
     }
 
     private val messagingApps = listOf(
@@ -88,18 +91,44 @@ class MessageAccessibilityService : AccessibilityService() {
 
         if (!isMessaging && !isBrowser) return
 
-        // ── Browser: capture URL only when the user navigates to a new page ────
-        if (isBrowser && event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            val rootNode = rootInActiveWindow ?: return
+        // ── Browser: capture URL on STATE_CHANGED and CONTENT_CHANGED ─────────
+        // STATE_CHANGED fires on page load but not always for in-tab navigation.
+        // CONTENT_CHANGED fires on every DOM update — rate-limited to once/second.
+        if (isBrowser && (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)) {
+            val now = System.currentTimeMillis()
+            if (now - lastBrowserScanTime < BROWSER_SCAN_INTERVAL) return
+            lastBrowserScanTime = now
+
+            Log.d(TAG, "🌐 Browser event: pkg=$packageName type=${getEventTypeString(event.eventType)}")
+            val rootNode = rootInActiveWindow ?: run {
+                Log.w(TAG, "⚠️ rootInActiveWindow is null for $packageName")
+                return
+            }
             try {
                 val url = captureBrowserUrl(rootNode, packageName)
-                url?.takeIf { it.isNotBlank() && it != lastCapturedUrl && it.startsWith("http") }
-                    ?.let {
-                        lastCapturedUrl = it
-                        Log.d(TAG, "🌐 Browser URL: $it")
-                        saveBrowserUrl(packageName, it)
-                        extractAndAnalyzeUrls(it)
+                // Chrome strips https:// from the address bar — normalize bare domains
+                val normalizedUrl = when {
+                    url == null -> null
+                    url.startsWith("http") -> url
+                    url.contains(".") && !url.contains(" ") -> "https://$url"
+                    else -> null
+                }
+                when {
+                    normalizedUrl == null            -> Log.w(TAG, "⚠️ No usable URL from bar text: $url")
+                    normalizedUrl == lastCapturedUrl -> Log.d(TAG, "⏭️ Same URL as last capture, skipping: $normalizedUrl")
+                    else -> {
+                        lastCapturedUrl = normalizedUrl
+                        Log.d(TAG, "✅ Browser URL captured: $normalizedUrl")
+                        saveBrowserUrl(packageName, normalizedUrl)
+                        try {
+                            val dc = DataCollector(applicationContext)
+                            dc.analyzeUrlAndSave(normalizedUrl, "BROWSER")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "❌ analyzeUrlAndSave error: ${e.message}")
+                        }
                     }
+                }
             } finally {
                 rootNode.recycle()
             }
@@ -123,7 +152,7 @@ class MessageAccessibilityService : AccessibilityService() {
                 messages.forEach { message ->
                     if (message.isNotBlank() && !isSystemText(message)) {
                         saveMessage(packageName, message)
-                        extractAndAnalyzeUrls(message)
+                        extractAndAnalyzeUrls(message, "MESSAGE")
                     }
                 }
             } finally {
@@ -257,46 +286,49 @@ class MessageAccessibilityService : AccessibilityService() {
     }
 
     private fun captureBrowserUrl(rootNode: AccessibilityNodeInfo, packageName: String): String? {
-        var capturedUrl: String? = null
-
-        val chromeAddressBarId = "com.android.chrome:id/url_bar"
-        val nodes = rootNode.findAccessibilityNodeInfosByViewId(chromeAddressBarId)
-
-        if (nodes != null && nodes.isNotEmpty()) {
-            val urlNode = nodes[0]
-            if (urlNode.text != null && urlNode.text.toString().isNotBlank()) {
-                capturedUrl = urlNode.text.toString()
-            }
-            urlNode.recycle()
-        }
-
-        if (capturedUrl == null) {
-            val httpNodes = rootNode.findAccessibilityNodeInfosByText("http")
-            for (node in httpNodes) {
-                if (node.text != null &&
-                    (node.text.toString().startsWith("http://") ||
-                            node.text.toString().startsWith("https://"))) {
-                    capturedUrl = node.text.toString()
-                    node.recycle()
-                    break
+        // Try known address-bar view IDs across Chrome versions
+        val candidateIds = listOf(
+            "$packageName:id/url_bar",
+            "$packageName:id/search_box_text",
+            "$packageName:id/url_bar_edittext",
+            "com.android.chrome:id/url_bar",
+            "com.google.android.apps.chrome:id/url_bar"
+        )
+        for (viewId in candidateIds) {
+            val nodes = rootNode.findAccessibilityNodeInfosByViewId(viewId)
+            if (!nodes.isNullOrEmpty()) {
+                val text = nodes[0].text?.toString()
+                nodes.forEach { it.recycle() }
+                if (!text.isNullOrBlank()) {
+                    Log.d(TAG, "📍 URL bar found via $viewId → $text")
+                    return text
                 }
-                node.recycle()
             }
         }
-
-        return capturedUrl
+        // Fallback: scan all nodes for any http text
+        Log.d(TAG, "📍 No viewId match — scanning tree for 'http' text")
+        val httpNodes = rootNode.findAccessibilityNodeInfosByText("http")
+        for (node in httpNodes) {
+            val text = node.text?.toString()
+            node.recycle()
+            if (text != null && (text.startsWith("http://") || text.startsWith("https://"))) {
+                Log.d(TAG, "📍 URL found via text scan: $text")
+                return text
+            }
+        }
+        Log.w(TAG, "📍 captureBrowserUrl: no URL found in tree (pkg=$packageName)")
+        return null
     }
 
-    private fun extractAndAnalyzeUrls(text: String) {
+    private fun extractAndAnalyzeUrls(text: String, sourceType: String = "MESSAGE") {
         val urlRegex = Regex("https?://[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=]+")
         urlRegex.findAll(text).forEach { match ->
             val url = match.value
-            Log.d(TAG, "🔍 Found URL to analyze: $url")
+            Log.d(TAG, "🔍 Found URL in $sourceType: $url")
             try {
-                val dataCollector = DataCollector(applicationContext)
-                dataCollector.analyzeUrlAndSave(url)
+                DataCollector(applicationContext).analyzeUrlAndSave(url, sourceType)
             } catch (e: Exception) {
-                Log.e(TAG, "Error analyzing URL: ${e.message}")
+                Log.e(TAG, "❌ analyzeUrlAndSave error for $url: ${e.message}")
             }
         }
     }

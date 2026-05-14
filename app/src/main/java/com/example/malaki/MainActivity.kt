@@ -13,6 +13,8 @@ import androidx.appcompat.app.AppCompatActivity
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreSettings
+import com.google.firebase.firestore.MemoryCacheSettings
 import com.example.malaki.auth.AuthManager
 import com.example.malaki.ui.auth.AppAuthFlow
 import com.example.malaki.ui.theme.MalakiTheme
@@ -73,7 +75,12 @@ class MainActivity : AppCompatActivity() {
                 FirebaseApp.initializeApp(this)
             }
             auth = FirebaseAuth.getInstance()
-            firestore = FirebaseFirestore.getInstance()
+            firestore = FirebaseFirestore.getInstance().also { db ->
+                val settings = FirebaseFirestoreSettings.Builder()
+                    .setLocalCacheSettings(MemoryCacheSettings.newBuilder().build())
+                    .build()
+                db.firestoreSettings = settings
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }

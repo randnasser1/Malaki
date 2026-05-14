@@ -20,7 +20,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import org.json.JSONObject
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -46,15 +49,77 @@ fun MoodCalendar(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var currentMonth by remember { mutableStateOf(Calendar.getInstance()) }
     var selectedDay by remember { mutableStateOf<String?>(null) }
 
-    // Load moods and journals
-    val prefs = context.getSharedPreferences("app_prefs", android.content.Context.MODE_PRIVATE)
-    val moodsJson = prefs.getString("moods", "{}") ?: "{}"
-    val moods = remember(moodsJson) { JSONObject(moodsJson) }
-    val journalsJson = prefs.getString("journals", "{}") ?: "{}"
-    val journals = remember(journalsJson) { JSONObject(journalsJson) }
+    // Firestore data states
+    var isLoading by remember { mutableStateOf(true) }
+    var moods by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var journals by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    // Load data from Firestore when component loads or month changes
+    LaunchedEffect(currentMonth) {
+        isLoading = true
+        error = null
+
+        val auth = FirebaseAuth.getInstance()
+        val currentUser = auth.currentUser
+
+        if (currentUser == null) {
+            error = "Not logged in"
+            isLoading = false
+            return@LaunchedEffect
+        }
+
+        try {
+            val firestore = FirebaseFirestore.getInstance()
+            val childId = currentUser.uid
+
+            // Calculate date range for current month
+            val year = currentMonth.get(Calendar.YEAR)
+            val month = currentMonth.get(Calendar.MONTH) + 1
+            val startDate = String.format("%04d-%02d-01", year, month)
+
+            val cal = Calendar.getInstance()
+            cal.set(year, currentMonth.get(Calendar.MONTH), 1)
+            val lastDay = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
+            val endDate = String.format("%04d-%02d-%02d", year, month, lastDay)
+
+            // Query Firestore for wellbeing data in this month
+            val docs = firestore.collection("wellbeing_daily_summary")
+                .whereEqualTo("childId", childId)
+                .get()
+                .await()
+
+            val moodsMap = mutableMapOf<String, String>()
+            val journalsMap = mutableMapOf<String, String>()
+
+            for (doc in docs.documents) {
+                val date = doc.getString("date") ?: continue
+                // Only include dates from current month
+                if (date.startsWith("$year-$month") || date.startsWith("$year-0$month")) {
+                    val mood = doc.getString("dailyMood") ?: doc.getString("dominantEmotion")
+                    if (mood != null) {
+                        moodsMap[date] = mood
+                    }
+                    val journal = doc.getString("journalText")
+                    if (!journal.isNullOrEmpty()) {
+                        journalsMap[date] = journal
+                    }
+                }
+            }
+
+            moods = moodsMap
+            journals = journalsMap
+            isLoading = false
+
+        } catch (e: Exception) {
+            error = "Failed to load: ${e.message}"
+            isLoading = false
+        }
+    }
 
     // Get days in month
     val calendar = Calendar.getInstance().apply {
@@ -71,8 +136,8 @@ fun MoodCalendar(
     )
 
     val selectedDayData = selectedDay?.let { dateStr ->
-        val mood = if (moods.has(dateStr)) moods.getString(dateStr) else null
-        val journal = if (journals.has(dateStr)) journals.getString(dateStr) else null
+        val mood = moods[dateStr]
+        val journal = journals[dateStr]
         Triple(dateStr, mood, journal)
     }
 
@@ -87,6 +152,7 @@ fun MoodCalendar(
             time = currentMonth.time
             add(Calendar.MONTH, delta)
         }
+        selectedDay = null  // Clear selection when month changes
     }
 
     Box(
@@ -149,74 +215,113 @@ fun MoodCalendar(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Day names
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                dayNames.forEach { day ->
-                    Text(
-                        text = day,
-                        color = Color(0xFF9CA3AF),
-                        fontSize = 14.sp,
-                        modifier = Modifier.weight(1f),
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Calendar grid
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(7),
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+            // Loading state
+            if (isLoading) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().padding(32.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    // Empty cells for days before month starts
-                    items(firstDayOfWeek) {
-                        Box(modifier = Modifier.size(40.dp))
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Loading your moods...", color = Color(0xFF6B7280), fontSize = 12.sp)
                     }
-
-                    // Days of month
-                    items(daysInMonth) { day ->
-                        val dayNum = day + 1
-                        val dateStr = formatDate(dayNum)
-                        val mood = if (moods.has(dateStr)) moods.getString(dateStr) else null
-                        val bgColor = mood?.let { moodColors[it] } ?: Color(0xFFF3F4F6)
-                        val emoji = mood?.let { moodEmojis[it] }
-                        val isSelected = selectedDay == dateStr
-
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .padding(2.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (isSelected) bgColor.copy(alpha = 0.8f) else bgColor)
-                                .then(
-                                    if (isSelected) Modifier.border(2.dp, bgColor.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
-                                    else Modifier
-                                )
-                                .clickable { selectedDay = dateStr },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                if (emoji != null) {
-                                    Text(emoji, fontSize = 14.sp)
+                }
+            } else if (error != null) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("⚠️", fontSize = 32.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(error ?: "Unknown error", color = Color(0xFFEF4444), fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TextButton(onClick = {
+                            scope.launch {
+                                isLoading = true
+                                // Reload data by re-triggering the LaunchedEffect
+                                // Force a refresh by resetting currentMonth
+                                val tempMonth = currentMonth
+                                currentMonth = Calendar.getInstance().apply {
+                                    time = tempMonth.time
                                 }
-                                Text(
-                                    text = dayNum.toString(),
-                                    color = if (mood != null) Color.White else Color(0xFF9CA3AF),
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
+                            }
+                        }) {
+                            Text("Retry")
+                        }
+                    }
+                }
+            } else {
+                // Day names
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    dayNames.forEach { day ->
+                        Text(
+                            text = day,
+                            color = Color(0xFF9CA3AF),
+                            fontSize = 14.sp,
+                            modifier = Modifier.weight(1f),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Calendar grid
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(7),
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Empty cells for days before month starts
+                        items(firstDayOfWeek) {
+                            Box(modifier = Modifier.size(40.dp))
+                        }
+
+                        // Days of month
+                        items(daysInMonth) { day ->
+                            val dayNum = day + 1
+                            val dateStr = formatDate(dayNum)
+                            val mood = moods[dateStr]
+                            val bgColor = mood?.let { moodColors[it] } ?: Color(0xFFF3F4F6)
+                            val emoji = mood?.let { moodEmojis[it] }
+                            val isSelected = selectedDay == dateStr
+
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .padding(2.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isSelected) bgColor.copy(alpha = 0.8f) else bgColor)
+                                    .then(
+                                        if (isSelected) Modifier.border(2.dp, bgColor.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                                        else Modifier
+                                    )
+                                    .clickable { selectedDay = dateStr },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    if (emoji != null) {
+                                        Text(emoji, fontSize = 14.sp)
+                                    }
+                                    Text(
+                                        text = dayNum.toString(),
+                                        color = if (mood != null) Color.White else Color(0xFF9CA3AF),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
                             }
                         }
                     }
@@ -227,7 +332,7 @@ fun MoodCalendar(
 
             // Selected day details
             AnimatedVisibility(
-                visible = selectedDayData != null,
+                visible = selectedDayData != null && !isLoading,
                 enter = fadeIn() + slideInVertically(),
                 exit = fadeOut() + slideOutVertically()
             ) {

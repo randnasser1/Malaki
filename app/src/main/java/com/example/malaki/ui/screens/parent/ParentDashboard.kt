@@ -1,6 +1,5 @@
 package com.example.malaki.ui.screens.parent
 
-import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -37,14 +36,28 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.sp
 import com.example.malaki.BuildConfig
 import com.example.malaki.ui.theme.*
+import java.util.Date
+import java.util.Locale
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.draw.alpha
 // Data classes
 data class SentimentData(val day: String, val score: Int)
 data class WellbeingData(val category: String, val score: Int)
 data class SafetyIndicator(val type: String, val status: String, val description: String)
 data class ChildInfo(val id: String, val name: String)
 data class AppUsageItem(val name: String, val timeMin: Long)
-// Add this near your other data classes (around line 30-40)
+
+data class UrlSafetyAlert(
+    val id: String,
+    val url: String,
+    val domain: String,
+    val riskLevel: String,
+    val blockReasons: List<String>,
+    val confidenceScore: Float,
+    val sourceType: String,
+    val timestamp: Long
+)
+
 data class EmotionDayData(
     val date: String,
     val childLoggedEmotion: String?,
@@ -96,6 +109,9 @@ fun ParentDashboard(
     var alerts by remember { mutableStateOf<List<RiskAlert>>(emptyList()) }
     var isLoadingAlerts by remember { mutableStateOf(true) }
     var isLoadingDashboard by remember { mutableStateOf(true) }
+
+    var urlSafetyAlerts by remember { mutableStateOf<List<UrlSafetyAlert>>(emptyList()) }
+    var isLoadingContentSafety by remember { mutableStateOf(true) }
 
     var children by remember { mutableStateOf<List<ChildInfo>>(emptyList()) }
     var selectedChildId by remember { mutableStateOf<String?>(null) }
@@ -164,6 +180,14 @@ fun ParentDashboard(
 
             loadGroomingProbabilityFromFirebase(childId) { prob ->
                 groomingProbability = prob
+            }
+
+            // Load URL content safety alerts
+            isLoadingContentSafety = true
+            loadContentSafetyFromFirebase(childId) { loaded ->
+                urlSafetyAlerts = loaded
+                isLoadingContentSafety = false
+                Log.d("DASHBOARD", "Content safety: ${loaded.size} URL alerts")
             }
 
             // LOAD TBATS ANALYSIS (Behavioral Change Detection)
@@ -373,7 +397,23 @@ fun ParentDashboard(
                         groomingProbability = groomingProbability
                     )
                 }
-// 🆕 TOP EMOTIONS CARD - ADD THIS HERE
+
+                  // Risk Alerts Card
+                item {
+                    RiskAlertsCard(
+                        alerts = alerts,
+                        isLoading = isLoadingAlerts,
+                        onRefresh = {
+                            val childId = selectedChildId ?: return@RiskAlertsCard
+                            isLoadingAlerts = true
+                            loadAlertsFromFirebase(context, childId) { newAlerts ->
+                                alerts = newAlerts
+                                isLoadingAlerts = false
+                            }
+                        }
+                    )
+                }
+                // 🆕 TOP EMOTIONS CARD - ADD THIS HERE
                 item {
                     var topEmotions by remember { mutableStateOf<List<Pair<String, Float>>>(emptyList()) }
 
@@ -471,21 +511,6 @@ fun ParentDashboard(
                         }
                     }
                 }
-                  // Risk Alerts Card
-                item {
-                    RiskAlertsCard(
-                        alerts = alerts,
-                        isLoading = isLoadingAlerts,
-                        onRefresh = {
-                            val childId = selectedChildId ?: return@RiskAlertsCard
-                            isLoadingAlerts = true
-                            loadAlertsFromFirebase(context, childId) { newAlerts ->
-                                alerts = newAlerts
-                                isLoadingAlerts = false
-                            }
-                        }
-                    )
-                }
 // Wellbeing Indicators Card (Tabbed: Journal Emotions vs Daily Mood Calendar)
                 item {
                     var selectedWellbeingTab by remember { mutableStateOf(0) }
@@ -502,6 +527,11 @@ fun ParentDashboard(
 
                             try {
                                 val firestore = FirebaseFirestore.getInstance()
+                                val docs = firestore.collection("wellbeing_daily_summary")
+                                    .whereEqualTo("childId", selectedChildId)
+                                    .get()
+                                    .await()
+
                                 val moods = mutableMapOf<String, String>()
                                 val journals = mutableMapOf<String, String>()
                                 val emotionSums = mutableMapOf<String, Double>()
@@ -762,7 +792,8 @@ fun ParentDashboard(
                                                                 else -> Color(0xFFF3F4F6)
                                                             }
                                                             val emoji = when (mood) {
-                                                                "great", "good" -> "😊"
+                                                                "great"-> "😊"
+                                                                "good"->"👍"
                                                                 "okay" -> "😐"
                                                                 "anxious" -> "😰"
                                                                 "sad" -> "😢"
@@ -1096,9 +1127,25 @@ fun ParentDashboard(
                             }
                         }
                     }
-                }  
+                }
 
- // Behavioral Pattern Analysis — two-tab: App Usage Anomalies | Music Emotion Anomalies
+                // Content Safety Card (URL analysis via RapidAPI)
+                item {
+                    ContentSafetyCard(
+                        alerts = urlSafetyAlerts,
+                        isLoading = isLoadingContentSafety,
+                        onRefresh = {
+                            val cid = selectedChildId ?: return@ContentSafetyCard
+                            isLoadingContentSafety = true
+                            loadContentSafetyFromFirebase(cid) { loaded ->
+                                urlSafetyAlerts = loaded
+                                isLoadingContentSafety = false
+                            }
+                        }
+                    )
+                }
+
+                // Behavioral Pattern Analysis — two-tab: App Usage Anomalies | Music Emotion Anomalies
                 item {
                     var selectedBehaviorTab by remember { mutableStateOf(0) }
 
@@ -1159,54 +1206,76 @@ fun ParentDashboard(
 
 
 
-                // Safety Overview Card
-                item {
-                    DashboardCard(
-                        title = "Safety Overview",
-                        icon = "⚠️",
-                        iconColor = Color(0xFFEF4444)
-                    ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            safetyIndicators.forEach { indicator ->
-                                SafetyIndicatorRow(indicator)
-                            }
-                        }
+
+
+
+              // Explainer Card
+item {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFEFF6FF))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            // ⚠️ TESTING DISCLAIMER
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xFFFEF3C7)  // Warning yellow
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("⚠️", fontSize = 18.sp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "TESTING PURPOSES ONLY",
+                            color = Color(0xFF92400E),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
                     }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "This version displays message text for debugging. A production version would NEVER show private messages.",
+                        color = Color(0xFF92400E),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
                 }
-
-               
-
-              
-
-                // Explainer Card
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFEFF6FF))
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(
-                                text = "How This Works",
-                                color = Color(0xFF1F2937),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "This dashboard uses AI to analyze patterns in your child's mood tracking, journal entries, and digital activity to provide wellbeing insights.",
-                                color = Color(0xFF4B5563),
-                                fontSize = 13.sp
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "Privacy: Individual messages and private journal content are never displayed here. Only aggregated sentiment and pattern analysis is shown to respect your child's privacy while keeping them safe.",
-                                color = Color(0xFF4B5563),
-                                fontSize = 13.sp
-                            )
-                        }
-                    }
-                }
+            }
+            
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            Text(
+                text = "How This Works",
+                color = Color(0xFF1F2937),
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "This dashboard uses AI to analyze patterns in your child's mood tracking, journal entries, and digital activity to provide wellbeing insights.",
+                color = Color(0xFF4B5563),
+                fontSize = 13.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "⚠️ TESTING NOTE: Message previews are visible in this version. In a real production app, individual messages would NEVER be displayed - only aggregated sentiment and pattern analysis would be shown to protect privacy.",
+                color = Color(0xFFDC2626),
+                fontSize = 12.sp,
+                lineHeight = 17.sp
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Privacy: Individual messages and private journal content are never displayed here. Only aggregated sentiment and pattern analysis is shown to respect your child's privacy while keeping them safe.",
+                color = Color(0xFF6B7280),
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                modifier = Modifier.alpha(0.6f)  // Dimmed because it's not true for testing
+            )
+        }
+    }
+}
             }
         }
     }
@@ -1902,39 +1971,51 @@ fun loadDashboardDataFromFirebase(
 
             // ========== ADDED: APP USAGE ==========
             // Single-field filter only — no composite index required; filter by timestamp in Kotlin
-            val usageDocs = firestore.collection("app_usage")
-                .whereEqualTo("childId", childId)
-                .limit(30)
-                .get()
-                .await()
+// ========== APP USAGE ==========
+        val usageDocs = firestore.collection("app_usage")
+            .whereEqualTo("childId", childId)
+            .limit(30)
+            .get()
+            .await()
 
-            var totalScreenTimeMin = 0L
-            val allApps = mutableMapOf<String, Long>()
-            var daysWithData = 0
+        var totalScreenTimeMin = 0L
+        val allApps = mutableMapOf<String, Long>()
+        var daysWithData = 0
+        var validDaysCount = 0  // Add this for accurate count
 
-            for (doc in usageDocs.documents) {
-                val docTs = doc.getLong("timestamp") ?: 0L
-                if (docTs < sevenDaysAgo) continue
-                daysWithData++
-                totalScreenTimeMin += doc.getLong("totalTimeMin") ?: 0L
+        for (doc in usageDocs.documents) {
+            val docTs = doc.getLong("timestamp") ?: 0L
+            if (docTs < sevenDaysAgo) continue
+            
+            daysWithData++  // Count days WITHIN last 7 days
+            val dailyTotal = doc.getLong("totalTimeMin") ?: 0L
+            totalScreenTimeMin += dailyTotal
+            
+            Log.d("DASHBOARD", "Day $daysWithData: totalTimeMin=$dailyTotal, running sum=$totalScreenTimeMin")
 
-                @Suppress("UNCHECKED_CAST")
-                val apps = doc.get("apps") as? List<Map<String, Any>> ?: emptyList()
-                apps.forEach { app ->
-                    val name = app["app_name"] as? String ?: return@forEach
-                    val timeMin = (app["time_min"] as? Long) ?: (app["time_min"] as? Int)?.toLong() ?: 0L
-                    allApps[name] = (allApps[name] ?: 0L) + timeMin
-                }
+            @Suppress("UNCHECKED_CAST")
+            val apps = doc.get("apps") as? List<Map<String, Any>> ?: emptyList()
+            apps.forEach { app ->
+                val name = app["app_name"] as? String ?: return@forEach
+                val timeMin = (app["time_min"] as? Long) ?: (app["time_min"] as? Int)?.toLong() ?: 0L
+                allApps[name] = (allApps[name] ?: 0L) + timeMin
             }
+        }
 
-            val avgDailyMin = if (daysWithData > 0) totalScreenTimeMin / daysWithData else 0L
-            val hours = avgDailyMin / 60
-            val minutes = avgDailyMin % 60
+        // Calculate AVERAGE (not sum)
+        val avgDailyMin = if (daysWithData > 0) totalScreenTimeMin / daysWithData else 0L
+        val hours = avgDailyMin / 60
+        val minutes = avgDailyMin % 60
 
-            val usageMap = mutableMapOf<String, String>()
-            usageMap["screenTime"] = if (avgDailyMin > 0) "${hours}h ${minutes}m/day (avg of $daysWithData days)" else "No data yet"
-            usageMap["productiveTime"] = if (daysWithData > 0) "Tracking ${daysWithData} days" else "—"
+        Log.d("DASHBOARD", "Total sum: $totalScreenTimeMin min over $daysWithData days = $avgDailyMin min/day average")
 
+        val usageMap = mutableMapOf<String, String>()
+        usageMap["screenTime"] = if (avgDailyMin > 0) {
+            "${hours}h ${minutes}m/day (avg of $daysWithData days)"  // Explicitly says "avg"
+        } else {
+            "No data yet"
+        }
+        usageMap["productiveTime"] = if (daysWithData > 0) "Tracking ${daysWithData} days" else "—"
             val topAppsList = allApps.entries
                 .sortedByDescending { it.value }
                 .take(5)
@@ -2067,8 +2148,8 @@ fun loadAlertsFromFirebase(
 ) {
     GlobalScope.launch(Dispatchers.IO) {
         try {
-            android.util.Log.d("RiskAlerts", "Querying event_analysis for childId=$childId")
             val firestore = FirebaseFirestore.getInstance()
+            val twentyFourHoursAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
 
             // Filter by riskLevel at the DB level (single-field auto-index, no composite index needed).
             // Then narrow to this child in memory to avoid the alphabetical-document-ID cutoff problem.
@@ -2118,8 +2199,7 @@ fun loadAlertsFromFirebase(
             android.util.Log.d("RiskAlerts", "Final alerts count: ${alerts.size}")
             withContext(Dispatchers.Main) { onResult(alerts) }
         } catch (e: Exception) {
-            android.util.Log.e("RiskAlerts", "Query failed: ${e.message}", e)
-            withContext(Dispatchers.Main) { onResult(emptyList()) }
+            loadAlertsFromLocalStorage(context, onResult)
         }
     }
 }
@@ -2397,12 +2477,11 @@ fun AppUsageAnomaliesSection(
                     Spacer(Modifier.width(10.dp))
                     Column {
                         Text(
-                            if (daysCollected == 0) "Preparing analysis" else "Not enough data yet",
+                            "Not enough data yet",
                             fontWeight = FontWeight.SemiBold, color = Color(0xFF3730A3), fontSize = 13.sp
                         )
                         Text(
-                            if (daysCollected == 0) "App usage analysis is being prepared. Check back shortly."
-                            else "Collecting app usage patterns ($daysCollected/2 days). Anomaly detection activates once 2 days of data are collected.",
+                            "Collecting app usage patterns ($daysCollected/2 days). Anomaly detection activates once 2 days of data are collected.",
                             color = Color(0xFF6B7280), fontSize = 11.sp
                         )
                     }
@@ -2413,12 +2492,9 @@ fun AppUsageAnomaliesSection(
             Text("No categorised app usage data yet.", color = Color(0xFF9CA3AF), fontSize = 13.sp)
         }
         else -> {
-            val readyAnomalies = anomalies.filter { it.enoughData }.sortedByDescending { it.isAnomaly }
-            if (readyAnomalies.isEmpty()) {
-                Text("Collecting data for all categories.", color = Color(0xFF9CA3AF), fontSize = 13.sp)
-            } else {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    readyAnomalies.forEach { data -> AppCategoryAnomalyRow(data) }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                anomalies.sortedByDescending { it.isAnomaly }.forEach { data ->
+                    AppCategoryAnomalyRow(data)
                 }
             }
         }
@@ -2436,47 +2512,42 @@ fun AppCategoryAnomalyRow(data: CategoryAnomalyData) {
         "browsing"      -> "🌐"
         else            -> "📱"
     }
-    val anomalyColor = when {
+    val statusColor = when {
         data.isAnomaly && data.direction == "high" -> Color(0xFFEF4444)
         data.isAnomaly && data.direction == "low"  -> Color(0xFF3B82F6)
         else                                        -> Color(0xFF10B981)
     }
+    val statusText = when {
+        data.isAnomaly && data.direction == "high" -> "↑ High"
+        data.isAnomaly && data.direction == "low"  -> "↓ Low"
+        else                                        -> "Normal"
+    }
+    
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(8.dp),
-        color = if (data.isAnomaly) anomalyColor.copy(alpha = 0.07f) else Color(0xFFF9FAFB)
+        color = if (data.isAnomaly) statusColor.copy(alpha = 0.07f) else Color(0xFFF9FAFB)
     ) {
         Row(
             modifier = Modifier.padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(catEmoji, fontSize = 20.sp)
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Text(catEmoji, fontSize = 20.sp)
+                Spacer(Modifier.width(10.dp))
                 Text(
                     data.category.replaceFirstChar { it.uppercase() },
                     fontWeight = FontWeight.Medium, fontSize = 13.sp, color = Color(0xFF1F2937)
                 )
-                if (!data.enoughData) {
-                    Text("Collecting data for this category", color = Color(0xFF9CA3AF), fontSize = 11.sp)
-                } else {
-                    val actualPct = (data.actual * 100).toInt()
-                    Text("$actualPct% of daily cap", color = Color(0xFF6B7280), fontSize = 11.sp)
-                }
             }
-            Spacer(Modifier.width(6.dp))
-            if (data.enoughData) {
-                Surface(shape = RoundedCornerShape(50), color = anomalyColor.copy(alpha = 0.15f)) {
-                    Text(
-                        when {
-                            data.isAnomaly && data.direction == "high" -> "↑ High"
-                            data.isAnomaly && data.direction == "low"  -> "↓ Low"
-                            else                                        -> "Normal"
-                        },
-                        color = anomalyColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
-                }
+            
+            Surface(shape = RoundedCornerShape(50), color = statusColor.copy(alpha = 0.15f)) {
+                Text(
+                    statusText,
+                    color = statusColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                )
             }
         }
     }
@@ -2536,50 +2607,46 @@ fun MusicEmotionAnomaliesSection(
 @Composable
 fun MusicEmotionAnomalyRow(data: EmotionAnomalyData) {
     val emoji = MUSIC_MOOD_EMOJIS[data.emotion] ?: "🎵"
-    val baseColor = MUSIC_MOOD_COLORS[data.emotion] ?: Color(0xFF8B5CF6)
-    val anomalyColor = when {
+    val statusColor = when {
         data.isAnomaly && data.direction == "high" -> Color(0xFFEF4444)
         data.isAnomaly && data.direction == "low"  -> Color(0xFF3B82F6)
         else                                        -> Color(0xFF10B981)
     }
+    val statusText = when {
+        data.isAnomaly && data.direction == "high" -> "↑ High"
+        data.isAnomaly && data.direction == "low"  -> "↓ Low"
+        else                                        -> "Normal"
+    }
+    
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(8.dp),
-        color = if (data.isAnomaly) anomalyColor.copy(alpha = 0.07f) else Color(0xFFF9FAFB)
+        color = if (data.isAnomaly) statusColor.copy(alpha = 0.07f) else Color(0xFFF9FAFB)
     ) {
         Row(
             modifier = Modifier.padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(emoji, fontSize = 20.sp)
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Text(emoji, fontSize = 20.sp)
+                Spacer(Modifier.width(10.dp))
                 Text(
                     data.emotion.replaceFirstChar { it.uppercase() },
                     fontWeight = FontWeight.Medium, fontSize = 13.sp, color = Color(0xFF1F2937)
                 )
-                if (!data.enoughData) {
-                    Text("Collecting data for this emotion", color = Color(0xFF9CA3AF), fontSize = 11.sp)
-                }
             }
-            Spacer(Modifier.width(6.dp))
-            if (data.enoughData) {
-                Surface(shape = RoundedCornerShape(50), color = anomalyColor.copy(alpha = 0.15f)) {
-                    Text(
-                        when {
-                            data.isAnomaly && data.direction == "high" -> "↑ High"
-                            data.isAnomaly && data.direction == "low"  -> "↓ Low"
-                            else                                        -> "Normal"
-                        },
-                        color = anomalyColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
-                }
+            
+            Surface(shape = RoundedCornerShape(50), color = statusColor.copy(alpha = 0.15f)) {
+                Text(
+                    statusText,
+                    color = statusColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                )
             }
         }
     }
 }
-
 private val EMOTION_EMOJIS = mapOf(
     "admiration" to "🌟", "amusement" to "😄", "anger" to "😠", "annoyance" to "😒",
     "approval" to "👍", "caring" to "💚", "confusion" to "🤔", "curiosity" to "🧐",
@@ -2843,6 +2910,331 @@ fun SafetyIndicatorRow(indicator: SafetyIndicator) {
                 color = Color(0xFF6B7280),
                 fontSize = 11.sp
             )
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CONTENT SAFETY — URL analysis via RapidAPI ai-text-moderation
+// ══════════════════════════════════════════════════════════════════════════════
+fun loadContentSafetyFromFirebase(
+    childId: String,
+    onResult: (List<UrlSafetyAlert>) -> Unit
+) {
+    GlobalScope.launch {
+        try {
+            val cutoff = System.currentTimeMillis() - 7 * 24 * 60 * 60 * 1000L
+            Log.d("CONTENT_SAFETY", "Querying url_safety for childId=$childId cutoff=$cutoff")
+
+            // Add orderBy to get most recent first
+            val docs = FirebaseFirestore.getInstance()
+                .collection("url_safety")
+                .whereEqualTo("childId", childId)
+                .orderBy("timestamp", com.google.firebase.firestore.Query.Direction.DESCENDING)
+                .limit(200)  // Increased limit
+                .get()
+                .await()
+
+            Log.d("CONTENT_SAFETY", "Got ${docs.size()} url_safety docs for childId=$childId")
+
+            // Log all risk levels found
+            val riskLevels = docs.documents.map { it.getString("riskLevel") ?: "NULL" }.distinct()
+            Log.d("CONTENT_SAFETY", "Risk levels found: $riskLevels")
+
+            val alerts = docs.documents.mapNotNull { doc ->
+                val ts = doc.getLong("timestamp") ?: 0L
+                val riskLevel = doc.getString("riskLevel") ?: return@mapNotNull null
+                
+                // Check if this is our specific document
+                if (doc.id == "TDevogNGtCwm0uTrl3G1") {
+                    Log.d("CONTENT_SAFETY", "🎯 FOUND TARGET DOC: riskLevel=$riskLevel, ts=$ts, cutoff=$cutoff, ts>cutoff=${ts > cutoff}")
+                }
+                
+                if (ts < cutoff) {
+                    Log.d("CONTENT_SAFETY", "Skipping ${doc.id}: timestamp too old")
+                    return@mapNotNull null
+                }
+                
+                if (riskLevel == "SAFE" || riskLevel == "PENDING") {
+                    Log.d("CONTENT_SAFETY", "Skipping ${doc.id}: riskLevel=$riskLevel")
+                    return@mapNotNull null
+                }
+
+                @Suppress("UNCHECKED_CAST")
+                val blockReasons = (doc.get("blockReasons") as? List<*>)
+                    ?.mapNotNull { it as? String } ?: emptyList()
+                val url = doc.getString("url") ?: ""
+                val domain = doc.getString("domain") ?: url
+
+                Log.d("CONTENT_SAFETY", "✅ INCLUDING ${doc.id}: domain=$domain level=$riskLevel")
+
+                UrlSafetyAlert(
+                    id              = doc.id,
+                    url             = url,
+                    domain          = domain,
+                    riskLevel       = riskLevel,
+                    blockReasons    = blockReasons,
+                    confidenceScore = (doc.getDouble("confidenceScore") ?: 0.0).toFloat(),
+                    sourceType      = doc.getString("sourceType") ?: "UNKNOWN",
+                    timestamp       = ts
+                )
+            }
+
+            Log.d("CONTENT_SAFETY", "Returning ${alerts.size} URL safety alerts")
+            withContext(Dispatchers.Main) { onResult(alerts) }
+        } catch (e: Exception) {
+            Log.e("CONTENT_SAFETY", "loadContentSafetyFromFirebase FAILED: ${e.message}", e)
+            withContext(Dispatchers.Main) { onResult(emptyList()) }
+        }
+    }
+}
+private val CATEGORY_EXPLANATIONS = mapOf(
+    "Self-harm content"              to "Content that promotes or provides methods for self-harm or suicide.",
+    "Violent or threatening content" to "Threats, graphic violence, or content inciting harm to others.",
+    "Adult/sexual content"           to "Sexually explicit material not appropriate for children.",
+    "Hate speech"                    to "Content attacking people based on race, religion, gender, or other identity."
+)
+
+@Composable
+fun ContentSafetyCard(
+    alerts: List<UrlSafetyAlert>,
+    isLoading: Boolean,
+    onRefresh: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFFEF4444).copy(alpha = 0.1f),
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("🔒", fontSize = 20.sp)
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "Content Safety",
+                            color = Color(0xFF1F2937),
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 16.sp
+                        )
+                        Text(
+                            text = "URL analysis · last 7 days",
+                            color = Color(0xFF9CA3AF),
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+                IconButton(onClick = onRefresh) {
+                    Text("🔄", fontSize = 18.sp)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            when {
+                isLoading -> {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(
+                            color = Color(0xFF3B82F6),
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                }
+                alerts.isEmpty() -> {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("✅", fontSize = 32.sp)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "No unsafe URLs detected",
+                                color = Color(0xFF10B981),
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 14.sp
+                            )
+                            Text(
+                                text = "All analyzed links were safe",
+                                color = Color(0xFF9CA3AF),
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+                else -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        alerts.take(5).forEach { alert ->
+                            UrlSafetyAlertRow(alert = alert)
+                        }
+                        if (alerts.size > 5) {
+                            Text(
+                                text = "+ ${alerts.size - 5} more flagged URLs",
+                                color = Color(0xFF6B7280),
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun UrlSafetyAlertRow(alert: UrlSafetyAlert) {
+    val statusColor = when (alert.riskLevel) {
+        "CRITICAL" -> Color(0xFFDC2626)
+        "HIGH"     -> Color(0xFFEF4444)
+        "MEDIUM"   -> Color(0xFFF59E0B)
+        else       -> Color(0xFF6B7280)
+    }
+    val formattedTime = remember(alert.timestamp) {
+        SimpleDateFormat("HH:mm · MMM d", Locale.getDefault()).format(Date(alert.timestamp))
+    }
+    val sourceLabel = when (alert.sourceType) {
+        "BROWSER" -> "Browser"
+        "MESSAGE" -> "In message"
+        else      -> alert.sourceType
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = statusColor.copy(alpha = 0.05f),
+        border = androidx.compose.foundation.BorderStroke(1.dp, statusColor.copy(alpha = 0.25f))
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            // Risk badge + source + time
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .background(statusColor, RoundedCornerShape(4.dp))
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = statusColor.copy(alpha = 0.15f)
+                    ) {
+                        Text(
+                            text = alert.riskLevel,
+                            color = statusColor,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = Color(0xFF6B7280).copy(alpha = 0.1f)
+                    ) {
+                        Text(
+                            text = sourceLabel,
+                            color = Color(0xFF6B7280),
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                Text(text = formattedTime, color = Color(0xFF9CA3AF), fontSize = 10.sp)
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Domain / URL
+            Text(
+                text = alert.domain.ifBlank { alert.url.take(60) },
+                color = Color(0xFF1F2937),
+                fontWeight = FontWeight.Medium,
+                fontSize = 13.sp
+            )
+            if (alert.url.isNotBlank() && alert.url != alert.domain) {
+                Text(
+                    text = alert.url.take(80) + if (alert.url.length > 80) "…" else "",
+                    color = Color(0xFF9CA3AF),
+                    fontSize = 10.sp
+                )
+            }
+
+            // Flagged categories with explanations
+            if (alert.blockReasons.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                alert.blockReasons.forEach { reason ->
+                    val explanation = CATEGORY_EXPLANATIONS[reason]
+                    Column(modifier = Modifier.padding(bottom = 6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("⚠️", fontSize = 11.sp)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = reason,
+                                color = statusColor,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 12.sp
+                            )
+                        }
+                        if (explanation != null) {
+                            Text(
+                                text = explanation,
+                                color = Color(0xFF6B7280),
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(start = 20.dp, top = 2.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Confidence bar
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(text = "Confidence:", color = Color(0xFF9CA3AF), fontSize = 10.sp)
+                Spacer(modifier = Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(4.dp)
+                        .background(Color(0xFFE5E7EB), RoundedCornerShape(2.dp))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(fraction = alert.confidenceScore.coerceIn(0f, 1f))
+                            .fillMaxHeight()
+                            .background(statusColor, RoundedCornerShape(2.dp))
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "${"%.0f".format(alert.confidenceScore * 100)}%",
+                    color = statusColor,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
         }
     }
 }

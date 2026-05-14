@@ -366,29 +366,50 @@ class DataCollector(private val context: Context) {
             }
         }
     }
+    // Add this to DataCollector.kt
+
+    // Add this function to your current DataCollector.kt
+
     private val contentSafetyManager = ContentSafetyManager(context)
 
-    // Add this function
-    fun analyzeUrlAndSave(url: String) {
-        Thread {
+    // ── URL analysis pipeline ──────────────────────────────────────────────────
+    // sourceType: "BROWSER" (navigated in browser) or "MESSAGE" (found inside a message)
+    //
+    // Three-checkpoint pattern so Firestore always has a trace even if analysis fails:
+    //   CHECKPOINT 1 — write stub immediately (proves URL was captured)
+    //   CHECKPOINT 2 — run Jina + RapidAPI analysis
+    //   CHECKPOINT 3 — update stub with full results (or mark failed)
+    // Add this function - saves to url_safety for dashboard
+    private fun saveUrlSafetyToFirestore(url: String, result: ContentSafetyManager.SafetyResult, sourceType: String = "BROWSER") {
+        GlobalScope.launch {
             try {
-                val result = runBlocking {
-                    contentSafetyManager.analyzeUrl(url)
-                }
+                val auth = FirebaseAuth.getInstance()
+                val currentUser = auth.currentUser ?: return@launch
+                val firestore = FirebaseFirestore.getInstance()
 
-                if (!result.isSafe) {
-                    // Save risk alert to Firebase
-                    saveRiskAlert(url, result)
+                val domain = try {
+                    java.net.URI(url).host?.replace("www.", "") ?: url
+                } catch (e: Exception) { url }
 
-                    // Also save locally
-                    saveUrlAnalysis(url, result)
-                }
+                val safetyData = mapOf(
+                    "childId" to currentUser.uid,
+                    "url" to url,
+                    "domain" to domain,
+                    "riskLevel" to result.riskLevel.name,
+                    "blockReasons" to result.blockReasons,
+                    "confidenceScore" to result.confidenceScore,
+                    "sourceType" to sourceType,
+                    "timestamp" to System.currentTimeMillis()
+                )
+
+                firestore.collection("url_safety").add(safetyData).await()
+                Log.d(TAG, "✅ URL safety saved: $domain (${result.riskLevel.name})")
             } catch (e: Exception) {
-                Log.e(TAG, "Error analyzing URL: ${e.message}")
+                Log.e(TAG, "❌ Error saving URL safety: ${e.message}")
             }
-        }.start()
+        }
     }
-
+    // Your existing saveRiskAlert - remove the call to saveRiskAlertToFirestore
     private fun saveRiskAlert(url: String, result: ContentSafetyManager.SafetyResult) {
         val alert = JSONObject().apply {
             put("url", url)
@@ -411,7 +432,6 @@ class DataCollector(private val context: Context) {
 
         existingArray.put(alert)
 
-        // Keep last 500 alerts
         if (existingArray.length() > 500) {
             val trimmed = JSONArray()
             for (i in existingArray.length() - 500 until existingArray.length()) {
@@ -421,49 +441,188 @@ class DataCollector(private val context: Context) {
         } else {
             alertsFile.writeText(existingArray.toString(2))
         }
-        
-        // Write to Firestore
-        saveRiskAlertToFirestore(url, result)
+
+        // Don't call saveRiskAlertToFirestore - it doesn't exist
+    }
+    // In DataCollector.kt - CHANGE THIS FUNCTION (remove 'suspend')
+    fun analyzeUrlAndSave(url: String, sourceType: String = "MESSAGE") {
+        Thread {
+            try {
+                // Check for existing analysis
+                val alreadyProcessed = runBlocking {
+                    checkExistingUrlAnalysis(url)
+                }
+
+                if (alreadyProcessed != null) {
+                    val status = alreadyProcessed.getString("analysisStatus")
+                    Log.d(TAG, "⏭️ URL already analyzed: $url (status=$status)")
+                    return@Thread
+                }
+
+                val docId = writeUrlStub(url, sourceType)
+                Log.d(TAG, "📝 CP1 done: stub docId=$docId url=$url")
+
+                val result = runBlocking {
+                    contentSafetyManager.analyzeUrl(url)
+                }
+                Log.d(TAG, "✅ CP2 DONE: isSafe=${result.isSafe} level=${result.riskLevel}")
+
+                updateUrlRecord(docId, url, result, sourceType)
+                Log.d(TAG, "📝 CP3 done: Firestore record updated for $url")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ analyzeUrlAndSave failed for $url: ${e.message}")
+            }
+        }.start()
+    }    // Add this helper function to check for existing analysis
+// Add this helper function to check for existing analysis
+// Keep this as suspend - it's called with runBlocking
+private suspend fun checkExistingUrlAnalysis(url: String): JSONObject? {
+    return try {
+        val uid = FirebaseAuth.getInstance().currentUser?.uid ?: return null
+        val firestore = FirebaseFirestore.getInstance()
+        val sevenDaysAgo = System.currentTimeMillis() - (7 * 24 * 60 * 60 * 1000L)
+
+        val docs = firestore.collection("url_safety")
+            .whereEqualTo("childId", uid)
+            .whereEqualTo("url", url)
+            .get()
+            .await()
+
+        for (doc in docs.documents) {
+            val timestamp = doc.getLong("timestamp") ?: 0L
+            if (timestamp > sevenDaysAgo) {
+                val status = doc.getString("analysisStatus")
+                if (status == "completed") {
+                    Log.d(TAG, "Found existing analysis for $url with status=$status")
+                    return JSONObject().apply {
+                        put("analysisStatus", status)
+                        put("riskLevel", doc.getString("riskLevel") ?: "UNKNOWN")
+                    }
+                }
+            }
+        }
+        null
+    } catch (e: Exception) {
+        Log.e(TAG, "Error checking existing URL: ${e.message}")
+        null
+    }
+}    // Update browser history analyzer
+// Update this function - remove GlobalScope.launch
+    fun analyzeAllBrowserUrls() {
+        val browserHistory = getRecentBrowserHistory(30)
+        for (entry in browserHistory) {
+            Log.d(TAG, "🌐 Analyzing browser URL: ${entry.url}")
+            analyzeUrlAndSave(entry.url, "BROWSER")  // Direct call, no GlobalScope.launch
+        }
+    }    // Write a "captured" stub immediately — ensures the url_safety collection always exists
+    private fun writeUrlStub(url: String, sourceType: String): String? {
+        return try {
+            val uid = FirebaseAuth.getInstance().currentUser?.uid
+            if (uid == null) {
+                Log.e(TAG, "❌ writeUrlStub: no authenticated user")
+                return null
+            }
+            var docId: String? = null
+            runBlocking {
+                val ref = FirebaseFirestore.getInstance()
+                    .collection("url_safety")
+                    .add(mapOf(
+                        "childId"        to uid,
+                        "url"            to url,
+                        "domain"         to extractDomain(url),
+                        "sourceType"     to sourceType,
+                        "timestamp"      to System.currentTimeMillis(),
+                        "riskLevel"      to "PENDING",
+                        "analysisStatus" to "captured",
+                        "isSafe"         to false,
+                        "blockReasons"   to emptyList<String>(),
+                        "confidenceScore" to 0f,
+                        "categoryScores" to emptyMap<String, Float>()
+                    ))
+                    .await()
+                docId = ref.id
+                Log.d(TAG, "📝 Stub written: docId=${ref.id} domain=${extractDomain(url)}")
+            }
+            docId
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ writeUrlStub FAILED: ${e.javaClass.simpleName}: ${e.message}", e)
+            null
+        }
     }
 
-    private fun saveRiskAlertToFirestore(url: String, result: ContentSafetyManager.SafetyResult) {
+    // Update the stub with real analysis results
+    private fun updateUrlRecord(
+        docId: String?,
+        url: String,
+        result: ContentSafetyManager.SafetyResult,
+        sourceType: String
+    ) {
         GlobalScope.launch {
             try {
-                val auth = FirebaseAuth.getInstance()
-                val currentUser = auth.currentUser ?: return@launch
-
-                val firestore = FirebaseFirestore.getInstance()
-
-                // Store ONLY risk assessment data, NO URL or message content
-                val assessmentData = mapOf(
-                    "childId" to currentUser.uid,
-                    "timestamp" to System.currentTimeMillis(),
-                    "riskLevel" to result.riskLevel.name,
+                val uid = FirebaseAuth.getInstance().currentUser?.uid
+                if (uid == null) {
+                    Log.e(TAG, "❌ updateUrlRecord: no authenticated user")
+                    return@launch
+                }
+                val updates: Map<String, Any> = mapOf(
+                    "riskLevel"       to result.riskLevel.name,
+                    "isSafe"          to result.isSafe,
+                    "blockReasons"    to result.blockReasons,
                     "confidenceScore" to result.confidenceScore,
-                    "isAlertTriggered" to true,
-                    "sourceType" to "URL"  // Just the type, not the actual URL
-                    // ⚠️ NO "url" field - that stays local only
+                    "categoryScores"  to result.categoryScores,
+                    "analysisStatus"  to "completed"
                 )
-
-                firestore.collection("risk_assessment")  // Note: renamed from risk_reports
-                    .add(assessmentData)
-                    .await()
-
-                // URL stays LOCAL only (encrypted in Room, never sent to cloud)
-                repository.ensureDeviceProfile()
-                repository.captureEvent(
-                    eventType = "URL",
-                    rawText = url,  // Stays encrypted in local Room database
-                    textPreview = url.take(100),
-                    timestampUtc = System.currentTimeMillis()
-                )
-
-                Log.d(TAG, "✅ Risk assessment stored in Firestore (URL kept private locally)")
+                if (docId != null) {
+                    FirebaseFirestore.getInstance()
+                        .collection("url_safety")
+                        .document(docId)
+                        .update(updates)
+                        .await()
+                    Log.d(TAG, "✅ url_safety/$docId updated: level=${result.riskLevel.name}")
+                } else {
+                    // No stub docId — write a fresh full record
+                    FirebaseFirestore.getInstance()
+                        .collection("url_safety")
+                        .add(updates + mapOf(
+                            "childId"   to uid,
+                            "url"       to url,
+                            "domain"    to extractDomain(url),
+                            "sourceType" to sourceType,
+                            "timestamp" to System.currentTimeMillis()
+                        ))
+                        .await()
+                    Log.d(TAG, "✅ url_safety new full record written (no stub)")
+                }
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error writing risk assessment to Firestore: ${e.message}")
+                Log.e(TAG, "❌ updateUrlRecord FAILED: ${e.javaClass.simpleName}: ${e.message}", e)
             }
         }
     }
+
+    // Mark stub as failed so we can see where the pipeline broke in Firestore
+    private fun markUrlFailed(docId: String?, error: String?) {
+        if (docId == null) return
+        GlobalScope.launch {
+            try {
+                FirebaseFirestore.getInstance()
+                    .collection("url_safety")
+                    .document(docId)
+                    .update(
+                        "analysisStatus", "failed",
+                        "analysisError", error?.take(300) ?: "unknown"
+                    )
+                    .await()
+                Log.d(TAG, "📝 Marked url_safety/$docId as failed")
+            } catch (e: Exception) {
+                Log.e(TAG, "markUrlFailed error: ${e.message}")
+            }
+        }
+    }
+
+    private fun extractDomain(url: String): String = try {
+        android.net.Uri.parse(url).host ?: url
+    } catch (e: Exception) { url }
 
     private fun saveUrlAnalysis(url: String, result: ContentSafetyManager.SafetyResult) {
         val analysisFile = File(context.filesDir, "url_analysis.json")
@@ -676,14 +835,7 @@ class DataCollector(private val context: Context) {
         }
     }
 
-    // Function to analyze all unanalyzed browser URLs
-    fun analyzeAllBrowserUrls() {
-        val browserHistory = getRecentBrowserHistory(30)
-        for (entry in browserHistory) {
-            Log.d(TAG, "🌐 Analyzing browser URL: ${entry.url}")
-            analyzeUrlAndSave(entry.url)
-        }
-    }
+    // Analyze recent browser history — called by BackgroundService
 }
 
 data class BrowserHistoryEntry(

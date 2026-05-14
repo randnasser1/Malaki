@@ -35,6 +35,22 @@
       ]
     },
     {
+      "collectionGroup": "url_safety",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "childId", "order": "ASCENDING" },
+        { "fieldPath": "timestamp", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "url_safety",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "childId", "order": "ASCENDING" },
+        { "fieldPath": "url", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "wellbeing_daily_summary",
       "queryScope": "COLLECTION",
       "fields": [

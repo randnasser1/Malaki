@@ -1,5 +1,6 @@
 package com.example.malaki.ui.auth
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -8,13 +9,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.malaki.ui.components.angel.Angel
 import com.example.malaki.ui.components.angel.AngelVariant
-import androidx.compose.foundation.background
+
 @Composable
 fun UserTypeScreen(
     onParentSelected: () -> Unit,
@@ -68,7 +70,7 @@ fun UserTypeScreen(
 
             Spacer(modifier = Modifier.height(48.dp))
 
-            // Parent Button
+            // Parent Button - Updated to match theme
             Button(
                 onClick = onParentSelected,
                 modifier = Modifier
@@ -76,7 +78,7 @@ fun UserTypeScreen(
                     .height(56.dp),
                 shape = RoundedCornerShape(28.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF3B82F6),
+                    containerColor = Color(0xFFF59E0B),  // Warm amber/gold
                     contentColor = Color.White
                 )
             ) {
@@ -97,9 +99,11 @@ fun UserTypeScreen(
                     .height(56.dp),
                 shape = RoundedCornerShape(28.dp),
                 colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = Color(0xFFF59E0B)
+                    contentColor = Color(0xFFD4A574)  // Soft warm brown/coral
                 ),
-                border = ButtonDefaults.outlinedButtonBorder
+                border = ButtonDefaults.outlinedButtonBorder.copy(
+                    brush = SolidColor(Color(0xFFD4A574))
+                )
             ) {
                 Text(
                     text = "I'm a Child",

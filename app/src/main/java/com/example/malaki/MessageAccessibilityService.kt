@@ -425,7 +425,15 @@ class MessageAccessibilityService : AccessibilityService() {
             "replied to", "mentioned you", "shared a post",
             "voice message", "press and hold", "swipe up",
             "disappearing messages", "you turned off", "you turned on",
-            "no internet", "connecting", "loading", "refresh"
+            "no internet", "connecting", "loading", "refresh",
+            "active yesterday", "active today", "active now", "active",
+            "last active", "last seen", "last seen yesterday",
+            "yesterday", "today at", "yesterday at",
+            "joined instagram", "joined facebook", "joined",
+            "follows you", "followed by", "suggested for you",
+            "message request", "accept", "decline", "delete",
+            "block", "report", "mute", "unmute",
+            "typing...", "record voice message", "attach photo"
         )
 
         if (uiPhrases.any { lowerText.contains(it) }) {

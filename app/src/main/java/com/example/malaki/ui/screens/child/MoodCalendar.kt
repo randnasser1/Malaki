@@ -37,7 +37,7 @@ val moodColors = mapOf(
 
 val moodEmojis = mapOf(
     "great" to "😊",
-    "good" to "😊",
+    "good" to "👍",
     "okay" to "😐",
     "sad" to "😢",
     "anxious" to "😰"

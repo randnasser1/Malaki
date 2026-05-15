@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.IBinder
 import android.util.Log
 import com.example.malaki.db.BackendSyncManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
@@ -21,19 +22,21 @@ class BackgroundService : Service() {
 
     private val dataExecutor = Executors.newSingleThreadScheduledExecutor()
     private val syncExecutor = Executors.newSingleThreadScheduledExecutor()
+    private lateinit var dataCollector: DataCollector
 
     override fun onCreate() {
         super.onCreate()
+        dataCollector = DataCollector(this)
         Log.d(TAG, "✅ Background service created - REAL-TIME MODE ACTIVE")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "▶️ Background service started - collecting data every ${COLLECTION_INTERVAL_MINUTES} minutes")
 
-        // Schedule DATA COLLECTION every 2 minutes
+        // Schedule DATA COLLECTION every 2 minutes, first run after 1 minute
         dataExecutor.scheduleAtFixedRate({
             collectAllData()
-        }, 0, COLLECTION_INTERVAL_MINUTES, TimeUnit.MINUTES)
+        }, 1L, COLLECTION_INTERVAL_MINUTES, TimeUnit.MINUTES)
 
         // Schedule BACKEND SYNC every 60 seconds for ML analysis
         syncExecutor.scheduleAtFixedRate({
@@ -47,8 +50,6 @@ class BackgroundService : Service() {
         Log.d(TAG, "🔄 Collecting data (real-time mode)...")
 
         try {
-            val dataCollector = DataCollector(this)
-
             // Collect app usage (last 5 minutes only)
             dataCollector.saveAppUsageDataIncremental()  // You need to add this method
 
@@ -71,7 +72,7 @@ class BackgroundService : Service() {
     }
 
     private fun syncWithBackend() {
-        GlobalScope.launch {
+        GlobalScope.launch(Dispatchers.IO) {
             val ok = BackendSyncManager(this@BackgroundService).syncPendingEvents()
             if (ok) Log.d(TAG, "✅ Backend sync completed")
             // failures already logged inside syncPendingEvents

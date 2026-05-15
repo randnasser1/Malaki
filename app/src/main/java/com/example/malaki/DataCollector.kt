@@ -13,6 +13,7 @@ import com.example.malaki.security.ContentSafetyManager
 import kotlinx.coroutines.runBlocking
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -108,7 +109,7 @@ class DataCollector(private val context: Context) {
     }
     // Add this function to DataCollector class
     fun saveWellbeingResponse(score: Int, answers: String) {
-        GlobalScope.launch {
+        GlobalScope.launch(Dispatchers.IO) {
             try {
                 val auth = FirebaseAuth.getInstance()
                 val currentUser = auth.currentUser ?: return@launch
@@ -202,7 +203,7 @@ class DataCollector(private val context: Context) {
     }
 
     private fun saveAppUsageToFirestore(todayEntry: JSONObject) {
-        GlobalScope.launch {
+        GlobalScope.launch(Dispatchers.IO) {
             try {
                 val auth = FirebaseAuth.getInstance()
                 val currentUser = auth.currentUser ?: return@launch
@@ -241,7 +242,7 @@ class DataCollector(private val context: Context) {
     }
 
     private fun saveMusicDataToFirestore(musicArray: JSONArray, onSuccess: (() -> Unit)? = null) {
-        GlobalScope.launch {
+        GlobalScope.launch(Dispatchers.IO) {
             try {
                 val auth = FirebaseAuth.getInstance()
                 val currentUser = auth.currentUser ?: return@launch
@@ -370,7 +371,7 @@ class DataCollector(private val context: Context) {
 
     // Add this function to your current DataCollector.kt
 
-    private val contentSafetyManager = ContentSafetyManager(context)
+    private val contentSafetyManager by lazy { ContentSafetyManager(context) }
 
     // ── URL analysis pipeline ──────────────────────────────────────────────────
     // sourceType: "BROWSER" (navigated in browser) or "MESSAGE" (found inside a message)
@@ -381,7 +382,7 @@ class DataCollector(private val context: Context) {
     //   CHECKPOINT 3 — update stub with full results (or mark failed)
     // Add this function - saves to url_safety for dashboard
     private fun saveUrlSafetyToFirestore(url: String, result: ContentSafetyManager.SafetyResult, sourceType: String = "BROWSER") {
-        GlobalScope.launch {
+        GlobalScope.launch(Dispatchers.IO) {
             try {
                 val auth = FirebaseAuth.getInstance()
                 val currentUser = auth.currentUser ?: return@launch
@@ -447,6 +448,7 @@ class DataCollector(private val context: Context) {
     // In DataCollector.kt - CHANGE THIS FUNCTION (remove 'suspend')
     fun analyzeUrlAndSave(url: String, sourceType: String = "MESSAGE") {
         Thread {
+            var docId: String? = null
             try {
                 // Check for existing analysis
                 val alreadyProcessed = runBlocking {
@@ -459,7 +461,7 @@ class DataCollector(private val context: Context) {
                     return@Thread
                 }
 
-                val docId = writeUrlStub(url, sourceType)
+                docId = writeUrlStub(url, sourceType)
                 Log.d(TAG, "📝 CP1 done: stub docId=$docId url=$url")
 
                 val result = runBlocking {
@@ -472,6 +474,7 @@ class DataCollector(private val context: Context) {
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ analyzeUrlAndSave failed for $url: ${e.message}")
+                markUrlFailed(docId, e.message)
             }
         }.start()
     }    // Add this helper function to check for existing analysis
@@ -558,7 +561,7 @@ private suspend fun checkExistingUrlAnalysis(url: String): JSONObject? {
         result: ContentSafetyManager.SafetyResult,
         sourceType: String
     ) {
-        GlobalScope.launch {
+        GlobalScope.launch(Dispatchers.IO) {
             try {
                 val uid = FirebaseAuth.getInstance().currentUser?.uid
                 if (uid == null) {
@@ -603,7 +606,7 @@ private suspend fun checkExistingUrlAnalysis(url: String): JSONObject? {
     // Mark stub as failed so we can see where the pipeline broke in Firestore
     private fun markUrlFailed(docId: String?, error: String?) {
         if (docId == null) return
-        GlobalScope.launch {
+        GlobalScope.launch(Dispatchers.IO) {
             try {
                 FirebaseFirestore.getInstance()
                     .collection("url_safety")
@@ -734,7 +737,7 @@ private suspend fun checkExistingUrlAnalysis(url: String): JSONObject? {
     }
 
     private fun updateOrCreateTodayUsage(date: String, additionalTimeMs: Long, newApps: JSONArray) {
-        GlobalScope.launch {
+        GlobalScope.launch(Dispatchers.IO) {
             try {
                 val auth = FirebaseAuth.getInstance()
                 val currentUser = auth.currentUser ?: return@launch

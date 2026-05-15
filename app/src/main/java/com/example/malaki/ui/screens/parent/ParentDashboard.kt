@@ -2960,6 +2960,12 @@ fun loadContentSafetyFromFirebase(
                     return@mapNotNull null
                 }
 
+                val analysisStatus = doc.getString("analysisStatus") ?: ""
+                if (analysisStatus != "completed") {
+                    Log.d("CONTENT_SAFETY", "Skipping ${doc.id}: analysisStatus=$analysisStatus")
+                    return@mapNotNull null
+                }
+
                 @Suppress("UNCHECKED_CAST")
                 val blockReasons = (doc.get("blockReasons") as? List<*>)
                     ?.mapNotNull { it as? String } ?: emptyList()
@@ -3182,27 +3188,26 @@ fun UrlSafetyAlertRow(alert: UrlSafetyAlert) {
             }
 
             // Flagged categories with explanations
+            // Stored format: "emoji Label - explanation text"
             if (alert.blockReasons.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
                 alert.blockReasons.forEach { reason ->
-                    val explanation = CATEGORY_EXPLANATIONS[reason]
+                    val dashIdx = reason.indexOf(" - ")
+                    val title = if (dashIdx >= 0) reason.substring(0, dashIdx) else reason
+                    val explanation = if (dashIdx >= 0) reason.substring(dashIdx + 3) else null
                     Column(modifier = Modifier.padding(bottom = 6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("⚠️", fontSize = 11.sp)
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = reason,
-                                color = statusColor,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 12.sp
-                            )
-                        }
-                        if (explanation != null) {
+                        Text(
+                            text = title,
+                            color = statusColor,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.sp
+                        )
+                        if (!explanation.isNullOrBlank()) {
                             Text(
                                 text = explanation,
                                 color = Color(0xFF6B7280),
                                 fontSize = 11.sp,
-                                modifier = Modifier.padding(start = 20.dp, top = 2.dp)
+                                modifier = Modifier.padding(top = 2.dp)
                             )
                         }
                     }

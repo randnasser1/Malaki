@@ -17,6 +17,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.malaki.auth.AuthManager
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import android.content.Context
@@ -31,6 +32,7 @@ internal suspend fun generateUniquePin(): String {
             .get()
             .await()
         if (existing.isEmpty) return pin
+        delay(100)
     }
 }
 

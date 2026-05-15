@@ -10,7 +10,11 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.malaki.db.BackendSyncManager
 import com.example.malaki.db.EventRepository
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -21,12 +25,16 @@ import kotlin.collections.set
 
 class MessageAccessibilityService : AccessibilityService() {
 
+    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     companion object {
         private const val TAG = "MESSAGE_SERVICE"
         private val seenMessages = Collections.synchronizedSet(mutableSetOf<String>())
         private var lastProcessTime = 0L
         private const val MIN_PROCESS_INTERVAL = 500L
         private var lastCapturedUrl: String? = null
+        private var lastCapturedUrlTime: Long = 0L
+        private const val URL_DEDUP_WINDOW_MS = 30_000L // ignore same URL seen within 30 s
         private var lastBrowserScanTime = 0L
         private const val BROWSER_SCAN_INTERVAL = 1000L // scan URL bar at most once per second
     }
@@ -115,10 +123,13 @@ class MessageAccessibilityService : AccessibilityService() {
                     else -> null
                 }
                 when {
-                    normalizedUrl == null            -> Log.w(TAG, "⚠️ No usable URL from bar text: $url")
-                    normalizedUrl == lastCapturedUrl -> Log.d(TAG, "⏭️ Same URL as last capture, skipping: $normalizedUrl")
+                    normalizedUrl == null -> Log.w(TAG, "⚠️ No usable URL from bar text: $url")
+                    normalizedUrl == lastCapturedUrl &&
+                        (System.currentTimeMillis() - lastCapturedUrlTime) < URL_DEDUP_WINDOW_MS ->
+                        Log.d(TAG, "⏭️ Same URL within dedup window, skipping: $normalizedUrl")
                     else -> {
                         lastCapturedUrl = normalizedUrl
+                        lastCapturedUrlTime = System.currentTimeMillis()
                         Log.d(TAG, "✅ Browser URL captured: $normalizedUrl")
                         saveBrowserUrl(packageName, normalizedUrl)
                         try {
@@ -259,7 +270,7 @@ class MessageAccessibilityService : AccessibilityService() {
         }
 
         // Save to Room
-        runBlocking {
+        serviceScope.launch {
             val repository = EventRepository(applicationContext)
             repository.ensureDeviceProfile()
             repository.captureEvent(
@@ -283,6 +294,7 @@ class MessageAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        serviceScope.cancel()
     }
 
     private fun captureBrowserUrl(rootNode: AccessibilityNodeInfo, packageName: String): String? {

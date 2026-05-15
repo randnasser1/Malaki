@@ -49,16 +49,39 @@ class ContentSafetyManager(private val context: Context) {
         val pageText = try {
             extractTextWithJina(url)
         } catch (e: Exception) {
-            // Jina failed — send the URL itself to the API so it can still classify
-            Log.w(TAG, "⚠️ Jina failed: ${e.message} — falling back to URL-only analysis")
-            return checkWithRapidApi("URL: $url")
+            Log.w(TAG, "⚠️ Jina failed: ${e.message} — cannot extract page text, aborting analysis")
+            throw Exception("Text extraction failed for $url: ${e.message}")
         }
         Log.d(TAG, "📖 STEP 1 DONE: ${pageText.length} chars. Preview: ${pageText.take(200)}")
 
-        // Prepend the URL so the API has full context (path like /r/cutting matters)
-        val textToAnalyze = "URL: $url\n\n${pageText}"
+        // Skip nav/breadcrumb boilerplate at the top of Jina output (short lines < 80 chars).
+        // The first long line is the start of real article content.
+        val bodyText = stripLeadingBoilerplate(pageText)
+        Log.d(TAG, "📖 Body after boilerplate strip: ${bodyText.length} chars. Preview: ${bodyText.take(200)}")
+
+        // Prepend the URL so the API has context (path like /r/cutting matters).
+        // Keep URL prefix short — "U: " saves chars for actual content.
+        val textToAnalyze = "URL: $url\n\n$bodyText"
         Log.d(TAG, "🔍 STEP 2: sending ${textToAnalyze.length.coerceAtMost(2000)} chars to RapidAPI…")
         return checkWithRapidApi(textToAnalyze)
+    }
+
+    private fun stripLeadingBoilerplate(text: String): String {
+        val linkPattern = Regex("\\[.*?]\\(.*?\\)")
+        val lines = text.lines()
+        // Real prose: after removing markdown links, still has > 60 chars of plain text,
+        // and doesn't look like a Jina metadata line or a markdown heading.
+        val firstContentLine = lines.indexOfFirst { line ->
+            val t = line.trim()
+            val withoutLinks = linkPattern.replace(t, "").trim()
+            withoutLinks.length > 60 &&
+                !t.startsWith("#") &&
+                !t.startsWith("Title:") &&
+                !t.startsWith("URL Source:") &&
+                !t.startsWith("Markdown Content:")
+        }
+        val stripped = if (firstContentLine > 0) lines.drop(firstContentLine).joinToString("\n") else text
+        return if (stripped.length >= 150) stripped else text
     }
 
     private fun extractTextWithJina(url: String): String {
@@ -95,7 +118,7 @@ class ContentSafetyManager(private val context: Context) {
 
         val body = JSONObject().apply {
             put("text", text.take(2000))
-            put("detail_level", "light")
+            put("detail_level", "full")
         }.toString().toRequestBody("application/json".toMediaType())
 
         val request = Request.Builder()

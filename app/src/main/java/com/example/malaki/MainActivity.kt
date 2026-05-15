@@ -96,7 +96,7 @@ class MainActivity : AppCompatActivity() {
 
         handler.postDelayed({
             collectDataIfPermitted()
-        }, 5000)
+        }, 30000)
     }
 
     private fun collectDataIfPermitted() {

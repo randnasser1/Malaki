@@ -47,10 +47,3 @@ BACKEND\_URL=http://your-pc-ip:8000
 * Notification Listener (for music detection)
 * Internet (for backend sync)
 
-## Architecture
-
-* MVVM pattern
-* Repository pattern for data
-* Offline-first with Room database
-* Background service for continuous monitoring
-

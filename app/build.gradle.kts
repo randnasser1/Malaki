@@ -16,7 +16,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-        buildConfigField("String", "BACKEND_BASE_URL", "\"http://192.168.1.7:8000\"")
+        buildConfigField("String", "BACKEND_BASE_URL", "\"http://10.90.6.35:8000\"")
         manifestPlaceholders += mapOf(
             "redirectSchemeName" to "malaki",
             "redirectHostName" to "callback"

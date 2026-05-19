@@ -2007,7 +2007,7 @@ fun loadDashboardDataFromFirebase(
         val hours = avgDailyMin / 60
         val minutes = avgDailyMin % 60
 
-        Log.d("DASHBOARD", "Total sum: $totalScreenTimeMin min over $daysWithData days = $avgDailyMin min/day average")
+            Log.d("DASHBOARD", "Total sum: $totalScreenTimeMin min over $daysWithData days = $avgDailyMin min/day average")
 
         val usageMap = mutableMapOf<String, String>()
         usageMap["screenTime"] = if (avgDailyMin > 0) {
